@@ -207,13 +207,6 @@ with st.sidebar:
         _selected_name = None
         st.caption("No files found in data_vol_surface/")
 
-    st.divider()
-    st.subheader("Data Parameters")
-    snap_date = st.date_input(
-        "Snapshot date",
-        value=date.today(),
-        help="Date used to compute time-to-expiry for each row",
-    )
     interp_method = "spline"
 
     st.divider()
@@ -230,12 +223,23 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Resolve data source
 # ---------------------------------------------------------------------------
+def _date_from_filename(name: str) -> date:
+    """Extract snapshot date from vol_surface_dd_mm_yyyy.xlsx; fall back to today."""
+    import re
+    m = re.search(r"(\d{2})_(\d{2})_(\d{4})", name)
+    if m:
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return date(y, mo, d)
+    return date.today()
+
 if uploaded is not None:
     file_bytes   = uploaded.read()
     source_label = f"Uploaded: {uploaded.name}"
+    snap_date    = _date_from_filename(uploaded.name)
 elif _selected_name is not None:
     file_bytes   = _file_options[_selected_name].read_bytes()
     source_label = f"data_vol_surface/{_selected_name}"
+    snap_date    = _date_from_filename(_selected_name)
 else:
     st.info("Add .xlsx files to the data_vol_surface/ folder or upload one in the sidebar.")
     st.stop()

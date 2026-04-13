@@ -103,7 +103,7 @@ vol_surface_excel/
 ├── README.md
 ├── src/
 │   ├── data_loader.py        # Excel ingestion, validation, long-format output
-│   ├── surface_builder.py    # Grid interpolation (bicubic spline) + SVI fitting
+│   ├── iv_surface_builder.py    # Grid interpolation (bicubic spline) + SVI fitting
 │   ├── montecarlo.py         # Monte Carlo European call pricer via Dupire local vol
 │   ├── local_vol.py          # Dupire local vol via SVI + PCHIP
 │   ├── plots.py              # All Plotly chart functions
@@ -111,7 +111,7 @@ vol_surface_excel/
 │   └── streamlit_app.py      # UI entry-point
 └── tests/
     ├── test_data_loader.py
-    ├── test_surface_builder.py
+    ├── test_iv_surface_builder.py
     └── test_arbitrage_checks.py
 ```
 
@@ -124,7 +124,7 @@ data_vol_surface/*.xlsx   (or uploaded file)
    data_loader.py  ──────────────────────────────────┐
           │                                           │
           ▼                                           ▼
- surface_builder.py                            local_vol.py
+ iv_surface_builder.py                            local_vol.py
           │                                           │    \
           └──────────────────┬────────────────────────┘     ▼
                              ▼                         montecarlo.py
@@ -718,7 +718,7 @@ matters most for short-dated option pricing.
 
 ---
 
-### `surface_builder.py`
+### `iv_surface_builder.py`
 
 | Function / Class | Description |
 |---|---|
@@ -811,7 +811,7 @@ Tests live in `tests/` and are run with `uv run pytest tests/ -v`.
 | File | Tests |
 |---|---|
 | `test_data_loader.py` | Schema validation, long-format output columns, metadata extraction, time-to-expiry computation |
-| `test_surface_builder.py` | Surface grid shape, no negative vols, front-end spike preservation, 1-D interpolation |
+| `test_iv_surface_builder.py` | Surface grid shape, no negative vols, front-end spike preservation, 1-D interpolation |
 | `test_arbitrage_checks.py` | Calendar / butterfly / vertical check logic on synthetic data |
 
 All tests load data from `data_vol_surface/vol_surface.xlsx` (relative to the

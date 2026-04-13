@@ -19,7 +19,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 
-from surface_builder import SurfaceGrid
+from iv_surface_builder import SurfaceGrid
 from local_vol import LocalVolGrid
 
 _PALETTE = px.colors.qualitative.Plotly

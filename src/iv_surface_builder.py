@@ -1,5 +1,5 @@
 """
-surface_builder.py — Grid interpolation and surface smoothing.
+iv_iv_surface_builder.py — Grid interpolation and surface smoothing.
 
 Takes the long-format vol DataFrame and produces a dense 2-D grid
 (moneyness × time-to-expiry) suitable for surface plotting.

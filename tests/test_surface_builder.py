@@ -1,4 +1,4 @@
-"""Tests for surface_builder.py — interpolation correctness."""
+"""Tests for iv_surface_builder.py — interpolation correctness."""
 import sys
 from pathlib import Path
 
@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from data_loader import load_workbook
-from surface_builder import build_surface, interpolate_slice
+from iv_surface_builder import build_surface, interpolate_slice
 
 WORKBOOK = Path(__file__).parent.parent / "data_vol_surface" / "vol_surface.xlsx"
 

@@ -53,7 +53,7 @@ _LV_CAP       = 1.50    # 150 % hard ceiling — above this is a numerical artef
 _G_FLOOR      = 0.05    # denominator guard
 _W_FLOOR      = 1e-8
 _DWT_FLOOR    = 1e-6    # floor for dw/dT to avoid holes from numerical noise
-_T_MIN_CUTOFF = 0.04    # ~2 weeks
+_T_MIN_CUTOFF = 0.002   # ~1 day — include all short-dated expiries
 _N_X_FINE     = 200     # fine x grid for SVI evaluation before T-derivative
 
 

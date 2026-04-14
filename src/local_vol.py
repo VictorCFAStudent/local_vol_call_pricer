@@ -62,7 +62,17 @@ _N_X_FINE     = 200     # fine x grid for SVI evaluation before T-derivative
 # ---------------------------------------------------------------------------
 
 def _svi_fit_slice(x: np.ndarray, w_obs: np.ndarray) -> dict | None:
-    """Fit SVI to (x, w) pairs.  Returns param dict or None on failure."""
+    """Fit SVI to (x, w) pairs.  Returns param dict or None on failure.
+
+    Uses relative squared-error as the objective so that each moneyness
+    point contributes equally regardless of its absolute total-variance
+    level.  Absolute MSE causes the extreme wing (60 % put with w >> ATM)
+    to dominate the fit, collapsing the right wing toward zero.
+
+    Multiple restarts with a data-driven initialisation: m is seeded at the
+    observed smile minimum (which may be off-ATM in skewed markets), and a
+    is seeded just below that minimum w value.
+    """
     def svi_w(p, x):
         a, b, rho, m, sigma = p
         z = x - m
@@ -72,15 +82,39 @@ def _svi_fit_slice(x: np.ndarray, w_obs: np.ndarray) -> dict | None:
         w_hat = svi_w(p, x)
         if np.any(w_hat <= 0):
             return 1e10
-        return float(np.sum((w_hat - w_obs)**2))
+        return float(np.sum(((w_hat - w_obs) / w_obs) ** 2))   # relative MSE
 
-    x0 = [float(np.mean(w_obs)), 0.1, -0.5, 0.0, 0.1]
-    bounds = [(-0.5, 1.0), (1e-4, 1.0), (-0.999, 0.999), (-1.0, 1.0), (1e-4, 1.0)]
-    res = minimize(obj, x0, bounds=bounds, method="L-BFGS-B",
-                   options={"maxiter": 1000, "ftol": 1e-15})
-    if not res.success and res.fun > 1e-4:
+    # Data-driven seed: anchor m at the observed smile minimum
+    i_min  = int(np.argmin(w_obs))
+    m_init = float(x[i_min])
+    a_init = float(w_obs[i_min]) * 0.85
+
+    starts = [
+        [a_init, 0.10, -0.70, m_init, 0.10],
+        [a_init, 0.15, -0.50, m_init, 0.15],
+        [a_init, 0.20, -0.80, m_init, 0.20],
+        [a_init, 0.10, -0.30, m_init, 0.05],
+        [float(np.mean(w_obs)), 0.10, -0.50, 0.0, 0.10],
+    ]
+    bounds = [(-0.5, 2.0), (1e-4, 2.0), (-0.999, 0.999), (-1.0, 1.0), (1e-4, 1.0)]
+
+    best_res, best_fun = None, np.inf
+    for x0 in starts:
+        res = minimize(obj, x0, bounds=bounds, method="L-BFGS-B",
+                       options={"maxiter": 2000, "ftol": 1e-15})
+        if res.fun < best_fun:
+            best_fun = res.fun
+            best_res = res
+
+    # Reject if average relative error per point exceeds 20 %.
+    # A poor SVI is worse than the numerical fallback.
+    if best_res is None or best_fun / len(w_obs) > 0.04:
         return None
-    a, b, rho, m, sigma = res.x
+
+    a, b, rho, m, sigma = best_res.x
+    if not np.all(svi_w(best_res.x, x) > 0):
+        return None
+
     return {"a": a, "b": b, "rho": rho, "m": m, "sigma": sigma}
 
 

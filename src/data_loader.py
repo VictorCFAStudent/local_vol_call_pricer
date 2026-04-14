@@ -5,13 +5,13 @@ Reads the Bloomberg OVME wide-format vol surface sheet and returns a tidy
 long-format DataFrame plus a metadata dict.
 
 Actual sheet layout (VolSurface):
-  Row 1 : title string
-  Row 2 : headers  → "Exp Date" | "Imp" | "80.0" | "90.0" | … | "120.0"
-  Row 3+: data     → date str  | fwd   | IV%    | IV%    | … | IV%
+  Row 1 : headers  → "Exp Date" | "ImpFwd" | "60.0%" | "80.0%" | … | "140.0%"
+  Row 2 : absolute strike prices for each moneyness level (reference only)
+  Row 3+: data     → date str  | fwd      | IV%     | IV%     | … | IV%
 
-"Imp"  = forward price for that expiry (grows with T, consistent with a
-         risk-neutral forward F = S·exp((r-q)·T)).
-Moneyness columns are K/F × 100  (so 100.0 = ATM-forward).
+"ImpFwd" = forward price for that expiry (grows with T, consistent with a
+           risk-neutral forward F = S·exp((r-q)·T)).
+Moneyness columns are K/F × 100  (so 100.0% = ATM-forward).
 Vol values are quoted in percentage points (22.03 → σ = 0.2203).
 """
 
@@ -62,14 +62,16 @@ def load_workbook(path: str | Path, snap_date: date | None = None) -> VolDataset
 # ---------------------------------------------------------------------------
 def _parse_vol_surface(raw: pd.DataFrame, snap: date) -> pd.DataFrame:
     """Melt the wide-format sheet into a tidy long DataFrame."""
-    header_row = raw.iloc[1]
-    # Collect the moneyness labels from columns C onwards (e.g. 80.0, 90.0 …)
+    header_row = raw.iloc[0]
+    # Collect moneyness labels from columns C onwards (e.g. "60.0%", "80.0%" …)
+    # Strip optional trailing "%" before converting to float.
     moneyness_pcts: list[float] = []
     for cell in header_row.iloc[_VOL_START:]:
         if pd.isna(cell):
             break
-        moneyness_pcts.append(float(cell))
+        moneyness_pcts.append(float(str(cell).replace("%", "")))
 
+    # Row index 1 contains absolute strike prices (reference only) — skip it.
     records: list[dict] = []
     for _, row in raw.iloc[2:].iterrows():
         raw_date = row.iloc[_DATE_COL]
@@ -112,8 +114,7 @@ def _parse_vol_surface(raw: pd.DataFrame, snap: date) -> pd.DataFrame:
 
 
 def _extract_metadata(raw: pd.DataFrame, vol_df: pd.DataFrame, snap: date) -> dict:
-    title_cell = raw.iloc[0, 0]
-    title = str(title_cell) if pd.notna(title_cell) else "Implied Volatility Surface"
+    title = "Implied Volatility Surface"
 
     spot: float | None = None
     if not vol_df.empty:

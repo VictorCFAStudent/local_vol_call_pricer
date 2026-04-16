@@ -9,7 +9,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from data_loader import load_workbook
 from iv_surface_builder import build_surface, interpolate_slice
 
-WORKBOOK = Path(__file__).parent.parent / "data_vol_surface" / "vol_surface.xlsx"
+_DATA_DIR = Path(__file__).parent.parent / "data_vol_surface"
+_CANDIDATES = sorted(_DATA_DIR.glob("vol_surface*.xlsx"))
+WORKBOOK = _CANDIDATES[-1] if _CANDIDATES else _DATA_DIR / "vol_surface.xlsx"
 
 
 @pytest.fixture(scope="module")

@@ -14,9 +14,9 @@ x = ln(K/F):
 
 Numerical strategy — why SVI?
 ------------------------------
-With only 9 moneyness quotes per expiry, numerical second derivatives of the
-implied vol smile are highly sensitive to the non-uniform strike spacing
-(80, 90, 95, 97.5, 100, 102.5, 105, 110, 120 %) — the cluster at 95–100 %
+With only ~12 moneyness quotes per expiry (60 %–140 % in the Bloomberg OVME
+sheet), numerical second derivatives of the implied vol smile are highly
+sensitive to the non-uniform strike spacing — the cluster around ATM
 causes CubicSpline to produce wild d²w/dx² values.
 
 Instead we:
@@ -41,6 +41,7 @@ from collections import namedtuple
 import numpy as np
 import pandas as pd
 from scipy.interpolate import PchipInterpolator, RegularGridInterpolator, RectBivariateSpline
+from scipy.ndimage import gaussian_filter
 from scipy.optimize import minimize
 
 # ---------------------------------------------------------------------------
@@ -50,10 +51,10 @@ LocalVolGrid = namedtuple(
 )
 
 _LV_CAP       = 1.50    # 150 % hard ceiling — above this is a numerical artefact
-_G_FLOOR      = 0.05    # denominator guard
+_G_FLOOR      = 0.02    # denominator guard
 _W_FLOOR      = 1e-8
 _DWT_FLOOR    = 1e-6    # floor for dw/dT to avoid holes from numerical noise
-_T_MIN_CUTOFF = 0.002   # ~1 day — include all short-dated expiries
+_T_MIN_CUTOFF = 0.04    # ~2 weeks
 _N_X_FINE     = 200     # fine x grid for SVI evaluation before T-derivative
 
 
@@ -242,6 +243,13 @@ def build_local_vol(
             col[~valid] = col[valid][0]
         else:
             col[:] = np.interp(x_fine[j], x_raw, IV_raw.mean(axis=0))
+
+    # Light smoothing: reduces front-end spikiness and wing noise without
+    # distorting the well-conditioned ATM region.
+    # sigma=(T_axis, x_axis) — more smoothing across strikes than across maturities.
+    LV_for_interp = gaussian_filter(LV_for_interp, sigma=(0.6, 1.5))
+    LV_for_interp = np.clip(LV_for_interp, 0.005, _LV_CAP)
+
     rgi_lv = RegularGridInterpolator(
         (T_raw, x_fine), LV_for_interp,
         method="linear", bounds_error=False, fill_value=None,

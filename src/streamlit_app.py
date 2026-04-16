@@ -7,9 +7,9 @@ Run with:
 UI layout
 ---------
 Sidebar  : daily file selector (data_vol_surface/) · file uploader · snap-date
-           · interpolation method · risk-free rate · moneyness range slider
-Main     : metric cards · 6 tabs (IV Surface / Vol Smiles / Term Structure /
-           Heatmap / Local Volatility / Arbitrage Checks)
+           · risk-free rate · moneyness range slider
+Main     : metric cards · 7 tabs (IV Surface / Vol Smiles / Term Structure /
+           Heatmap / Local Volatility / MC Pricer / Arbitrage Checks)
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ import streamlit as st
 from arbitrage_checks import run_all_checks, CheckResult
 from data_loader import load_workbook, VolDataset
 from local_vol import build_local_vol, LocalVolGrid
-from montecarlo import price_european_call, MCResult
+from montecarlo import price_european_option, MCResult
 from iv_surface_builder import svi_fit, build_surface, SurfaceGrid
 from plots import (
     plot_arbitrage_flags,
@@ -211,9 +211,9 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Pricing / Arbitrage")
-    risk_free_rate = st.slider(
+    risk_free_rate = st.number_input(
         "Risk-free rate r (%)",
-        min_value=0.0, max_value=10.0, value=4.5, step=0.25,
+        min_value=0.0, max_value=20.0, value=4.500, step=0.001, format="%.3f",
         help="Used in Black-76 call prices for the vertical spread check",
     ) / 100.0
 
@@ -572,7 +572,7 @@ with tab_lv:
 
 # ── MC Pricer ─────────────────────────────────────────────────────────────────
 with tab_mc:
-    st.subheader("Monte Carlo Call Pricer — Dupire Local Vol")
+    st.subheader("Monte Carlo Option Pricer — Dupire Local Vol")
 
     # Build the local vol grid (cached; shares result with Local Vol tab if
     # the same resolution was already requested)
@@ -588,6 +588,98 @@ with tab_mc:
     else:
         # ── Inputs ────────────────────────────────────────────────────────
         spot_default   = float(meta.get("spot_price", 5000))
+
+        # ── Payoff selector ───────────────────────────────────────────────
+        _payoff_col, _digi_col = st.columns([2, 1])
+        with _payoff_col:
+            _type_choice = st.segmented_control(
+                "Option type",
+                options=["Call", "Put"],
+                default="Call",
+                selection_mode="single",
+                key="mc_type_seg",
+            )
+            mc_option_type = (_type_choice or "Call").lower()
+        with _digi_col:
+            mc_is_digital = st.toggle(
+                "Digital (cash-or-nothing)",
+                value=False,
+                key="mc_digital_toggle",
+                help=(
+                    "Off → vanilla payoff max(S_T−K, 0) / max(K−S_T, 0).  "
+                    "On  → pays a fixed cash amount if ITM at expiry, else 0."
+                ),
+            )
+
+        mc_digital_payout = 1.0
+        if mc_is_digital:
+            mc_digital_payout = st.number_input(
+                "Cash payout",
+                min_value=0.0001, value=1.0, step=0.5, format="%.4f",
+                help="Cash amount paid if S_T is ITM at expiry.  Common conventions: 1.0 (unit), or the option notional.",
+            )
+
+        # ── Barrier selector (mutually exclusive with Digital) ────────────
+        # A digital pays a fixed cash amount if ITM at expiry — the barrier
+        # concept does not apply, so we hide the barrier controls in that case.
+        mc_barrier_type  = None
+        mc_barrier_level = None
+        mc_barrier_style = "american"
+
+        if mc_is_digital:
+            st.caption(
+                "Barrier options are disabled for digitals."
+            )
+        else:
+            _BARRIER_LABELS = {
+                "None":          None,
+                "Up-and-Out":    "up_out",
+                "Up-and-In":     "up_in",
+                "Down-and-Out":  "down_out",
+                "Down-and-In":   "down_in",
+            }
+            _barrier_choice = st.segmented_control(
+                "Barrier",
+                options=list(_BARRIER_LABELS.keys()),
+                default="None",
+                selection_mode="single",
+                key="mc_barrier_seg",
+                help=(
+                    "Up = barrier above spot, Down = below.  "
+                    "Out = option dies if barrier is touched.  "
+                    "In = option only activates once barrier is touched."
+                ),
+            )
+            mc_barrier_type = _BARRIER_LABELS[_barrier_choice or "None"]
+
+            if mc_barrier_type is not None:
+                _bcol1, _bcol2 = st.columns([1, 1])
+                with _bcol1:
+                    _is_up = mc_barrier_type.startswith("up")
+                    _default_B = spot_default * (1.10 if _is_up else 0.90)
+                    mc_barrier_level = st.number_input(
+                        "Barrier level B",
+                        min_value=0.01, value=float(_default_B), step=10.0,
+                        help=(
+                            "Up barriers require B > S₀; down barriers require B < S₀.  "
+                            "An option already past its barrier at inception is degenerate "
+                            "(knock-out → 0, knock-in → vanilla)."
+                        ),
+                    )
+                with _bcol2:
+                    _monitor_choice = st.segmented_control(
+                        "Barrier monitoring",
+                        options=["American", "European"],
+                        default="American",
+                        selection_mode="single",
+                        key="mc_monitor_seg",
+                        help=(
+                            "American: barrier monitored at every Euler step throughout the life.  "
+                            "European: barrier checked only at expiry — S_T alone decides hit / no-hit."
+                        ),
+                    )
+                    mc_barrier_style = (_monitor_choice or "American").lower()
+
         mc_col1, mc_col2, mc_col3 = st.columns(3)
 
         with mc_col1:
@@ -620,8 +712,11 @@ with tab_mc:
             mc_T = st.number_input(
                 "Maturity T (years)",
                 min_value=0.001, max_value=float(_mc_lv_grid.expiries.max()),
-                value=1.000, step=0.0025, format="%.4f",
-                help=f"Option maturity in years  (surface covers up to {_mc_lv_grid.expiries.max():.2f} yr)",
+                value=1.000, step=0.0001, format="%.4f",
+                help=(
+                    f"Option maturity in years (surface covers up to {_mc_lv_grid.expiries.max():.2f} yr).  "
+                    "Any 4-decimal value is accepted — e.g. 0.2500 (3 m), 0.1781 (65 d)."
+                ),
             )
             mc_eps = st.number_input(
                 "Convergence ε",
@@ -646,23 +741,48 @@ with tab_mc:
                 f"{_mc_lv_grid.expiries.max():.2f} yr.  Time will be clamped at the boundary."
             )
 
+        # Barrier sanity check
+        if mc_barrier_type is not None:
+            if mc_barrier_type.startswith("up") and mc_barrier_level <= mc_S0:
+                st.warning(
+                    f"Up barrier B={mc_barrier_level:g} is not above spot S₀={mc_S0:g}. "
+                    "The option is knocked out / activated at inception."
+                )
+            elif mc_barrier_type.startswith("down") and mc_barrier_level >= mc_S0:
+                st.warning(
+                    f"Down barrier B={mc_barrier_level:g} is not below spot S₀={mc_S0:g}. "
+                    "The option is knocked out / activated at inception."
+                )
+
         st.divider()
 
         # ── Run button ────────────────────────────────────────────────────
         if st.button("Compute Price", type="primary", use_container_width=False):
             with st.spinner("Running Monte Carlo simulation…"):
-                _mc_result = price_european_call(
+                _mc_result = price_european_option(
                     lv_grid        = _mc_lv_grid,
                     S0             = mc_S0,
                     K              = mc_K,
                     T              = mc_T,
                     r              = risk_free_rate,
                     q              = mc_q,
+                    option_type    = mc_option_type,
+                    is_digital     = mc_is_digital,
+                    digital_payout = mc_digital_payout,
+                    barrier_type   = mc_barrier_type,
+                    barrier_level  = mc_barrier_level,
+                    barrier_style  = mc_barrier_style,
                     steps_per_year = mc_steps,
                     eps            = mc_eps,
                 )
             st.session_state["mc_result"] = _mc_result
             st.session_state["mc_params"] = {
+                "option_type":    mc_option_type,
+                "is_digital":     mc_is_digital,
+                "digital_payout": mc_digital_payout,
+                "barrier_type":   mc_barrier_type,
+                "barrier_level":  mc_barrier_level,
+                "barrier_style":  mc_barrier_style,
                 "S0": mc_S0, "K": mc_K, "T": mc_T,
                 "r": risk_free_rate, "q": mc_q,
                 "steps": mc_steps, "eps": mc_eps,
@@ -677,7 +797,20 @@ with tab_mc:
             st.markdown("#### Results")
 
             r1, r2, r3, r4 = st.columns(4)
-            r1.metric("Call Price",     f"{res.price:.4f}")
+            _bt = params.get("barrier_type")
+            _bt_label = {
+                None:        "",
+                "up_out":    "Up-and-Out ",
+                "up_in":     "Up-and-In ",
+                "down_out":  "Down-and-Out ",
+                "down_in":   "Down-and-In ",
+            }.get(_bt, "")
+            _bs_label = ""
+            if _bt is not None:
+                _bs_label = f"({params.get('barrier_style', 'american').capitalize()}) "
+            _digi = "Digital " if params.get("is_digital") else ""
+            _price_label = f"{_bs_label}{_bt_label}{_digi}{params.get('option_type', 'call').capitalize()} Price"
+            r1.metric(_price_label,     f"{res.price:.4f}")
             r2.metric("Std Error",      f"± {res.std_error:.4f}")
             r3.metric("Paths simulated", f"{res.n_paths:,}")
             r4.metric(
@@ -709,6 +842,8 @@ with tab_mc:
 # ── Arbitrage Checks ──────────────────────────────────────────────────────────
 with tab_arb:
     st.subheader("Arbitrage-Free Checks")
+    # Three independent no-arbitrage checks run each time the risk-free rate
+    # number input is changed.
 
     with st.expander("ℹ️  Why does Bloomberg data show violations?", expanded=False):
         st.markdown(

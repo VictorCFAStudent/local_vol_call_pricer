@@ -1,9 +1,9 @@
 # Local Volatility Surface Explorer & Monte Carlo Pricer
 
 An interactive web application for exploring implied volatility surfaces,
-computing Dupire local volatility, and pricing European options via Monte Carlo
-simulation — all from a Bloomberg OVME Excel snapshot.  Built with Python,
-Streamlit, and Plotly.
+computing Dupire local volatility, and pricing European options (vanilla,
+digital, and barrier — calls and puts) via Monte Carlo simulation — all from
+a Bloomberg OVME Excel snapshot.  Built with Python, Streamlit, and Plotly.
 
 ---
 
@@ -53,8 +53,8 @@ This tool has two equal primary functions:
 2. **Local Volatility Monte Carlo Pricer** — fits Gatheral SVI to each expiry
    slice, applies the full Dupire formula (total-variance form with PCHIP
    derivatives and a T=0 anchor) to extract a dense local vol surface, then
-   prices European calls using a batched log-Euler Monte Carlo simulation with
-   adaptive convergence.
+   prices European vanilla, digital, and barrier options (calls and puts)
+   using a batched log-Euler Monte Carlo simulation with adaptive convergence.
 
 The app supports a **daily file workflow**: place one Bloomberg Excel file per
 day in the `data_vol_surface/` folder and switch between dates directly in the
@@ -64,12 +64,11 @@ The bundled dataset covers the **S&P 500 Index (SPX)** with:
 
 | Property | Value |
 |---|---|
-| Available snapshots | 08 Apr 2026, 09 Apr 2026 |
+| Available snapshots | 14 Apr 2026 |
 | Near-term forward | ~6 785 |
 | Expiry range | Next day → 17 Dec 2032 (33 slices) |
-| Moneyness levels | 80 % · 90 % · 95 % · 97.5 % · 100 % · 102.5 % · 105 % · 110 % · 120 % |
-| IV range | ~11.6 % → ~67.1 % |
-| Total data points per snapshot | 297 (33 expiries × 9 strikes) |
+| Moneyness levels | 60 % · 80 % · 90 % · 95 % · 97.5 % · 100 % · 102.5 % · 105 % · 110 % · 120 % · 130 % · 140 % (12 levels) |
+| IV range | ~10 % → ~70 % |
 
 ---
 
@@ -79,7 +78,7 @@ The bundled dataset covers the **S&P 500 Index (SPX)** with:
 |---|---|
 | **Daily file selector** | Reads all `.xlsx` files from `data_vol_surface/`, sorts by date embedded in filename (`dd_mm_yyyy`), and lets the user pick a snapshot from the sidebar |
 | **Data ingestion** | Parses the Bloomberg wide-format Excel sheet; validates schema and raises descriptive errors on failure |
-| **Surface building** | Interpolates the 33 × 9 raw grid onto a dense 60 × 60 regular grid using bicubic spline in log(T) space |
+| **Surface building** | Interpolates the raw (N_T × 12) grid onto a dense 60 × 60 regular grid using bicubic spline in log(T) space |
 | **3-D IV visualisation** | Interactive rotating surface with optional raw Bloomberg quote overlay |
 | **Vol smile slices** | Per-expiry IV vs moneyness curves with quick-select tenor buckets and optional Gatheral SVI overlay |
 | **SVI fitting** | Fits `w(x) = a + b·(ρ·(x−m) + √((x−m)²+σ²))` per expiry slice; displays 5 parameters and residual in a table |
@@ -97,21 +96,20 @@ The bundled dataset covers the **S&P 500 Index (SPX)** with:
 ```
 vol_surface_excel/
 ├── data_vol_surface/                  # One Bloomberg Excel file per snapshot date
-│   ├── vol_surface_08_04_2026.xlsx
-│   └── vol_surface_09_04_2026.xlsx
+│   └── vol_surface_14_04_2026.xlsx
 ├── pyproject.toml                     # uv / PEP 517 project config
 ├── README.md
 ├── src/
 │   ├── data_loader.py        # Excel ingestion, validation, long-format output
 │   ├── iv_surface_builder.py    # Grid interpolation (bicubic spline) + SVI fitting
-│   ├── montecarlo.py         # Monte Carlo European call pricer via Dupire local vol
+│   ├── montecarlo.py         # Monte Carlo pricer (vanilla / digital / barrier, call or put) via Dupire local vol
 │   ├── local_vol.py          # Dupire local vol via SVI + PCHIP
 │   ├── plots.py              # All Plotly chart functions
 │   ├── arbitrage_checks.py   # Calendar / butterfly / vertical checks
 │   └── streamlit_app.py      # UI entry-point
 └── tests/
     ├── test_data_loader.py
-    ├── test_iv_surface_builder.py
+    ├── test_surface_builder.py
     └── test_arbitrage_checks.py
 ```
 
@@ -229,8 +227,8 @@ format:
 
 | Row | Content |
 |---|---|
-| 1 | Title string (shown in the UI header; e.g. `"SPX Index Option Vol Surface"`) |
-| 2 | Headers: `Exp Date` · `Imp` · `80.0` · `90.0` · `95.0` · `97.5` · `100.0` · `102.5` · `105.0` · `110.0` · `120.0` |
+| 1 | Headers: `Exp Date` · `ImpFwd` · `60.0%` · `80.0%` · … · `140.0%` |
+| 2 | Absolute strike prices per moneyness level (reference only — skipped by the parser) |
 | 3 + | Data: expiry date string · forward price · implied vols in % |
 
 ### Column definitions
@@ -238,8 +236,8 @@ format:
 | Column | Example | Description |
 |---|---|---|
 | `Exp Date` | `16 Jun 2026` | Option expiry date (parsed with `dayfirst=True`) |
-| `Imp` | `6831.64` | Forward price F for that expiry slice |
-| `80.0` … `120.0` | `31.64` | Implied vol in **percentage points** at moneyness K/F = 80 % … 120 % |
+| `ImpFwd` | `6831.64` | Forward price F for that expiry slice |
+| `60.0%` … `140.0%` | `31.64` | Implied vol in **percentage points** at moneyness K/F = 60 % … 140 % |
 
 ### Moneyness convention
 
@@ -280,7 +278,7 @@ moneyness (%) and time-to-expiry (years).
 - **Rotate:** click and drag
 - **Zoom:** scroll wheel
 - **Hover:** displays exact moneyness, TTE, and IV at any grid point
-- **Show raw data points toggle:** overlays the 297 original Bloomberg quotes
+- **Show raw data points toggle:** overlays the original Bloomberg quotes
   as coloured scatter markers.  Marker colour uses the same `RdYlGn_r` scale
   as the surface (red = high IV, green = low IV) so you can judge immediately
   how well the interpolation tracks the actual quotes.
@@ -346,8 +344,8 @@ A metric below the chart shows the ATM vol change from expiry 1 to expiry 2
 
 ### 7.5 Heatmap Tab
 
-The full 33 × 9 IV matrix rendered as a colour-coded grid.  Each cell shows
-its value in percentage points.  Rows are sorted by ascending time-to-expiry
+The full IV matrix rendered as a colour-coded grid.  Each cell shows its
+value in percentage points.  Rows are sorted by ascending time-to-expiry
 (nearest expiry at the top).
 
 Useful for spotting outliers or suspicious data at a glance before running the
@@ -406,12 +404,27 @@ it.  This is the classic relationship between the two surfaces.
 
 ### 7.7 MC Pricer Tab
 
-Prices a European call option using the Dupire local vol surface via Monte Carlo simulation.  The local vol grid (resolution 100) is shared with the Local Volatility tab — no extra compute if already cached.
+Prices European options on the Dupire local vol surface via Monte Carlo
+simulation.  The local vol grid (resolution 100) is shared with the Local
+Volatility tab — no extra compute if already cached.
+
+**Supported payoffs:**
+
+| Option type | Style | Combinable with |
+|---|---|---|
+| Call / Put | Vanilla | Barrier (up/down × in/out, American or European monitoring) |
+| Call / Put | Digital (cash-or-nothing) | — (digitals pay only on terminal ITM; barrier controls are hidden in the UI) |
 
 **Inputs:**
 
 | Input | Default | Description |
 |---|---|---|
+| **Option type** | Call | Segmented control: `Call` or `Put` |
+| **Digital** | Off | Toggle — when on, payoff becomes cash-or-nothing (fixed amount if ITM at expiry, else 0).  Mutually exclusive with barriers: the Barrier controls are hidden while Digital is on. |
+| **Cash payout** (digital only) | 1.0 | Amount paid when `S_T` is ITM at expiry |
+| **Barrier** | None | Segmented control: `None`, `Up-and-Out`, `Up-and-In`, `Down-and-Out`, `Down-and-In` |
+| **Barrier level B** (barrier only) | S₀ × 1.10 (up) or 0.90 (down) | Absolute barrier level |
+| **Barrier monitoring** (barrier only) | American | `American` (every Euler step) or `European` (terminal spot only) |
 | **Spot S₀** | From dataset | Pre-filled from the loaded Bloomberg snapshot |
 | **Strike K** | ATM (= S₀) | Absolute strike level |
 | **Maturity T (years)** | 1.0000 | Option maturity; step 0.0025 yr ≈ 1 day; surface min ~0.04 yr |
@@ -419,7 +432,17 @@ Prices a European call option using the Dupire local vol surface via Monte Carlo
 | **Steps per year** | 252 (daily) | Euler discretisation steps; alternative: 52 (weekly) |
 | **Convergence ε** | 0.001 | Relative stopping threshold |
 
-The risk-free rate is shared with the sidebar (same value used for the arbitrage checks).
+The risk-free rate is shared with the sidebar (same value used for the
+arbitrage checks).
+
+**Barrier monitoring styles:**
+
+- **American** — the barrier is checked at every Euler step.  Discrete daily
+  sampling under-estimates the hit probability vs continuous monitoring, but
+  reproduces the behaviour of most traded barrier contracts.
+- **European** — the barrier is checked only at expiry (`S_T` alone decides
+  hit / no-hit).  A knock-out option then behaves like a vanilla one with a
+  payoff extinguished only if the terminal spot breaches the barrier.
 
 **Convergence rule:**
 
@@ -431,9 +454,14 @@ Paths run in batches of 500.  After each batch, stop when:
 
 Hard cap: 50 000 paths.
 
-**Surface coverage warnings** are shown before running if the strike moneyness or maturity falls outside the local vol surface domain.
+**Surface coverage warnings** are shown before running if the strike moneyness
+or maturity falls outside the local vol surface domain.  A barrier sanity
+check warns if the barrier is on the wrong side of spot at inception.
 
-**Outputs:** Call price · Standard error · 95% confidence interval · Paths simulated · Convergence badge (green = converged, amber = cap reached) · % of steps clamped to the surface boundary.
+**Outputs:** Price (label dynamically reflects flavour and style, e.g.
+"(American) Up-and-Out Digital Call Price") · Standard error · 95%
+confidence interval · Paths simulated · Convergence badge (green = converged,
+amber = cap reached) · % of steps clamped to the surface boundary.
 
 ---
 
@@ -501,7 +529,7 @@ d²IV / dK² ≥ 0   for all interior K at each expiry T
 ```
 
 **Implementation:** non-uniform centred finite differences are used because
-the moneyness grid is non-uniform (80, 90, 95, 97.5, 100, …):
+the moneyness grid is non-uniform (60, 80, 90, 95, 97.5, 100, 102.5, 105, 110, 120, 130, 140):
 
 ```
 d²IV/dK²  ≈  2 / (h₁ + h₂)  ×  [IV(K+h₂)/h₂  −  IV(K)·(1/h₁ + 1/h₂)  +  IV(K−h₁)/h₁]
@@ -547,7 +575,7 @@ fraction of the at-the-money premium.
 
 ## 9. Surface Interpolation
 
-The raw data is a complete 33 × 9 grid interpolated onto a dense 60 × 60
+The raw data is a complete (N_T × 12) grid interpolated onto a dense 60 × 60
 display grid using `scipy.interpolate.RectBivariateSpline` (bicubic,
 `kx = ky = 3`, `s = 0` for exact fit through every data point).
 
@@ -613,11 +641,11 @@ Both the skew term `(∂w/∂x)²` and curvature term `(∂²w/∂x²)` contribu
 
 ### 10.2 Why SVI?
 
-With only 9 moneyness quotes per expiry, numerical second derivatives of the
-implied vol smile are highly sensitive to the non-uniform strike spacing
-(80, 90, 95, 97.5, 100, 102.5, 105, 110, 120 %).  The cluster around 95–100 %
-causes `CubicSpline` to produce wild `d²w/dx²` values, making the denominator
-`g` ill-conditioned.
+With only ~12 moneyness quotes per expiry (60 %–140 % in the Bloomberg sheet),
+numerical second derivatives of the implied vol smile are highly sensitive to
+the non-uniform strike spacing.  The cluster around 95–100 % causes
+`CubicSpline` to produce wild `d²w/dx²` values, making the denominator `g`
+ill-conditioned.
 
 Instead, we fit a **Gatheral SVI** parametric smile per expiry slice:
 
@@ -671,7 +699,7 @@ prevents unnecessary holes in the surface.
 Apply the full Gatheral `g` formula and compute:
 
 ```
-σ²_loc = dw_dT_safe / g     where g > _G_FLOOR = 0.05
+σ²_loc = dw_dT_safe / g     where g > _G_FLOOR = 0.02
 ```
 
 Points where `g ≤ _G_FLOOR` are marked as arbitrage violations and set to
@@ -744,7 +772,7 @@ matters most for short-dated option pricing.
 | Constant | Value | Role |
 |---|---|---|
 | `_LV_CAP` | 1.50 | Hard ceiling (150 %) — values above are numerical artefacts |
-| `_G_FLOOR` | 0.05 | Denominator guard — points with `g ≤ 0.05` are masked |
+| `_G_FLOOR` | 0.02 | Denominator guard — points with `g ≤ 0.02` are masked |
 | `_W_FLOOR` | 1e-8 | Floor on total variance `w` before computing `g` |
 | `_DWT_FLOOR` | 1e-6 | Floor on `∂w/∂T` to prevent holes from numerical noise |
 | `_T_MIN_CUTOFF` | 0.04 | ~2 weeks — very short expiries excluded (unstable derivatives) |
@@ -771,9 +799,18 @@ matters most for short-dated option pricing.
 
 | Function / Class | Description |
 |---|---|
-| `price_european_call(lv_grid, S0, K, T, r, q, steps_per_year, eps, seed)` | Runs the MC simulation and returns `MCResult` |
+| `price_european_option(lv_grid, S0, K, T, r, q, option_type, is_digital, digital_payout, barrier_type, barrier_level, barrier_style, steps_per_year, eps, seed)` | Runs the MC simulation for vanilla / digital / barrier options (call or put) and returns `MCResult` |
 | `_build_lv_interpolator(lv_grid)` | Internal: builds a `RegularGridInterpolator` from `LocalVolGrid`, filling NaN holes |
 | `MCResult` | `namedtuple('MCResult', ['price', 'std_error', 'n_paths', 'converged', 'clamp_pct'])` |
+
+**Option flavours supported:**
+
+| Flavour | Triggered by | Payoff |
+|---|---|---|
+| Vanilla call/put | `is_digital=False`, `barrier_type=None` | `max(S_T − K, 0)` / `max(K − S_T, 0)` |
+| Digital call/put | `is_digital=True` | `digital_payout · 1_{S_T > K}` / `digital_payout · 1_{S_T < K}` |
+| Barrier (any of the above) | `barrier_type` ∈ `up_out`, `up_in`, `down_out`, `down_in` + `barrier_level` | Knock-in / knock-out applied to the underlying vanilla/digital payoff |
+| Barrier monitoring | `barrier_style` = `"american"` (default, every Euler step) or `"european"` (terminal spot only) | — |
 
 **Key constants:**
 
@@ -811,7 +848,7 @@ Tests live in `tests/` and are run with `uv run pytest tests/ -v`.
 | File | Tests |
 |---|---|
 | `test_data_loader.py` | Schema validation, long-format output columns, metadata extraction, time-to-expiry computation |
-| `test_iv_surface_builder.py` | Surface grid shape, no negative vols, front-end spike preservation, 1-D interpolation |
+| `test_surface_builder.py` | Surface grid shape, no negative vols, front-end spike preservation, 1-D interpolation |
 | `test_arbitrage_checks.py` | Calendar / butterfly / vertical check logic on synthetic data |
 
 All tests load data from `data_vol_surface/vol_surface.xlsx` (relative to the

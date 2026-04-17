@@ -8,8 +8,8 @@ UI layout
 ---------
 Sidebar  : daily file selector (data_vol_surface/) · file uploader · snap-date
            · risk-free rate · moneyness range slider
-Main     : metric cards · 7 tabs (IV Surface / Vol Smiles / Term Structure /
-           Heatmap / Local Volatility / MC Pricer / Arbitrage Checks)
+Main     : metric cards · 4 tabs (IV Surface [3-D / Smiles / Term Structure /
+           Heatmap] / Local Volatility / MC Pricer / Arbitrage Checks)
 """
 
 from __future__ import annotations
@@ -57,22 +57,31 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    /* Tab list */
+    /* Tab list — children grow equally to fill the full horizontal width */
     .stTabs [data-baseweb="tab-list"] {
         gap: 0px;
         border-bottom: 2px solid #e0e0e0;
     }
-    /* Each tab button */
+    /* Each tab button — flex:1 forces equal width */
     .stTabs [data-baseweb="tab"] {
-        font-size: 0.95rem;
+        flex: 1 1 0;
+        justify-content: center;
+        font-size: 1.1rem;
         font-weight: 500;
-        padding: 10px 28px;
+        padding: 16px 12px;
         border-right: 1px solid #e0e0e0;
         color: #555;
         letter-spacing: 0.02em;
     }
     .stTabs [data-baseweb="tab"]:first-child {
         border-left: 1px solid #e0e0e0;
+    }
+    /* Nested (sub) tabs — revert to natural size / left-aligned layout */
+    .stTabs .stTabs [data-baseweb="tab"] {
+        flex: 0 0 auto;
+        justify-content: flex-start;
+        font-size: 0.95rem;
+        padding: 10px 28px;
     }
     /* Active tab */
     .stTabs [aria-selected="true"] {
@@ -309,12 +318,87 @@ st.divider()
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab3d, tab_smile, tab_ts, tab_heat, tab_lv, tab_mc, tab_arb = st.tabs(
-    ["IV Surface", "Vol Smiles", "Term Structure", "Heatmap", "Local Volatility", "MC Pricer", "⚠️ Arbitrage Checks"]
+tab_iv, tab_lv, tab_mc, tab_arb = st.tabs(
+    ["IV Surface", "Local Volatility", "MC Pricer", "⚠️ Arbitrage Checks"]
 )
 
-# ── 3-D Surface ─────────────────────────────────────────────────────────────
-with tab3d:
+# ── IV Surface (3-D / Smiles / Term Structure) ──────────────────────────────
+with tab_iv:
+    st.subheader("Implied Volatility Surface")
+
+    # ── Desk-style summary: ATM level at two tenors + skew / convexity ─────
+    # Skew and butterfly are computed on the 90 / 100 / 110 moneyness points,
+    # which is the Bloomberg OVME equivalent of the 25-delta convention.
+    def _nearest_slice(target_T: float) -> tuple[float, pd.DataFrame]:
+        expiries = vol_df[["time_to_expiry"]].drop_duplicates()
+        idx = (expiries["time_to_expiry"] - target_T).abs().idxmin()
+        t_act = float(expiries.loc[idx, "time_to_expiry"])
+        return t_act, vol_df[vol_df["time_to_expiry"] == t_act]
+
+    def _iv_at(slice_df: pd.DataFrame, m_pct: float) -> float | None:
+        match = slice_df[slice_df["moneyness_pct"] == m_pct]
+        return float(match["implied_vol"].iloc[0]) if len(match) else None
+
+    _t_1m, _slice_1m = _nearest_slice(1.0 / 12.0)
+    _t_1y, _slice_1y = _nearest_slice(1.0)
+
+    _atm_1m = _iv_at(_slice_1m, 100.0)
+    _atm_1y = _iv_at(_slice_1y, 100.0)
+    _iv_90  = _iv_at(_slice_1m,  90.0)
+    _iv_110 = _iv_at(_slice_1m, 110.0)
+
+    _skew_1m = (_iv_90 - _iv_110) if (_iv_90 is not None and _iv_110 is not None) else None
+    _bf_1m   = (0.5 * (_iv_90 + _iv_110) - _atm_1m) if (
+        _iv_90 is not None and _iv_110 is not None and _atm_1m is not None
+    ) else None
+
+    def _fmt_pct(v):    return f"{v*100:.2f}%"    if v is not None else "—"
+    def _fmt_diff(v):   return f"{v*100:+.2f} pp" if v is not None else "—"
+
+    def _tenor_label(t: float) -> str:
+        if t < 1.0 / 12.0 * 1.5:
+            return f"~{t*365:.0f}D"
+        if t < 1.0:
+            return f"~{t*12:.0f}M"
+        return f"~{t:.1f}Y"
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric(
+        f"ATM IV ({_tenor_label(_t_1m)})",
+        _fmt_pct(_atm_1m),
+        help=f"Implied vol at 100% moneyness on the expiry closest to 1 month (T = {_t_1m:.3f} yr).",
+    )
+    m2.metric(
+        f"ATM IV ({_tenor_label(_t_1y)})",
+        _fmt_pct(_atm_1y),
+        help=f"Implied vol at 100% moneyness on the expiry closest to 1 year (T = {_t_1y:.3f} yr).",
+    )
+    m3.metric(
+        "Skew (90–110, 1M)",
+        _fmt_diff(_skew_1m),
+        help=(
+            "IV(90%) − IV(110%) on the ~1M slice.  "
+            "Proxy for the 25Δ risk reversal.  "
+            "Positive = downside premium (equity put skew, the typical regime)."
+        ),
+    )
+    m4.metric(
+        "Butterfly (1M)",
+        _fmt_diff(_bf_1m),
+        help=(
+            "½·(IV(90%) + IV(110%)) − IV(100%) on the ~1M slice.  "
+            "Proxy for the 25Δ butterfly / smile convexity.  "
+            "Positive = wings sit above ATM (the typical regime)."
+        ),
+    )
+
+    st.divider()
+
+    iv_sub3d, iv_sub_smile, iv_sub_ts, iv_sub_heat = st.tabs(
+        ["3-D Surface", "Vol Smiles", "Term Structure", "Heatmap"]
+    )
+
+with iv_sub3d:
     show_raw = st.toggle("Show raw data points", value=True,
                          help="Overlay the actual Bloomberg quotes as white dots")
     st.plotly_chart(
@@ -332,7 +416,7 @@ with tab3d:
     )
 
 # ── Smile Slices ─────────────────────────────────────────────────────────────
-with tab_smile:
+with iv_sub_smile:
     # ── Expiry selector ──────────────────────────────────────────────────────
     st.markdown("**Select expiries to display**")
 
@@ -459,7 +543,7 @@ with tab_smile:
             st.dataframe(show, use_container_width=True)
 
 # ── Term Structure ────────────────────────────────────────────────────────────
-with tab_ts:
+with iv_sub_ts:
     st.plotly_chart(plot_term_structure(vol_df), use_container_width=True)
 
     atm = (
@@ -470,7 +554,7 @@ with tab_ts:
     
 
 # ── Heatmap ───────────────────────────────────────────────────────────────────
-with tab_heat:
+with iv_sub_heat:
     st.plotly_chart(plot_heatmap(vol_df), use_container_width=True)
     st.caption("Colour = implied vol (%).  Rows sorted by ascending time-to-expiry.")
 

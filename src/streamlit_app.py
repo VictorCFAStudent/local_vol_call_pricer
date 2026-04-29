@@ -1046,9 +1046,13 @@ def _render_mc_pricer_form(
             help="Number of Euler time steps per year",
         )
     with _eps_col:
+        # Cap at 1% relative SE — looser tolerances than that are not useful
+        # in practice (95 % CI half-width ≈ 2 %), and the tighter the cap
+        # the less likely a fat-finger entry leaves the user with a price
+        # that *looks* converged but isn't.
         eps = st.number_input(
             "Convergence ε",
-            min_value=1e-6, max_value=0.05,
+            min_value=1e-6, max_value=0.01,
             value=0.001, step=0.0005, format="%.4f",
             key=f"{prefix}_eps",
             help=eps_help,

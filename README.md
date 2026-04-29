@@ -1,9 +1,10 @@
-# Local Volatility Surface Explorer & Monte Carlo Pricer
+# Local Volatility & Heston Stochastic Volatility Pricer
 
 An interactive web application for exploring implied volatility surfaces,
-computing Dupire local volatility, and pricing European options (vanilla,
-digital, and barrier — calls and puts) via Monte Carlo simulation — all from
-a Bloomberg OVME Excel snapshot.  Built with Python, Streamlit, and Plotly.
+computing Dupire local volatility, calibrating the Heston stochastic
+volatility model, and pricing European options (vanilla, digital, and
+barrier — calls and puts) via Monte Carlo simulation — all from a Bloomberg
+OVME Excel snapshot.  Built with Python, Streamlit, and Plotly.
 
 ---
 
@@ -21,9 +22,10 @@ a Bloomberg OVME Excel snapshot.  Built with Python, Streamlit, and Plotly.
    - 7.3 [Vol Smiles Tab](#73-vol-smiles-tab)
    - 7.4 [Term Structure Tab](#74-term-structure-tab)
    - 7.5 [Heatmap Tab](#75-heatmap-tab)
-   - 7.6 [Local Volatility Tab](#76-local-volatility-tab)
-   - 7.7 [MC Pricer Tab](#77-mc-pricer-tab)
-   - 7.8 [Arbitrage Checks Tab](#78-arbitrage-checks-tab)
+   - 7.6 [LV Surface Tab](#76-lv-surface-tab)
+   - 7.7 [LV MC Pricer Tab](#77-lv-mc-pricer-tab)
+   - 7.8 [Heston Pricer Tab](#78-heston-pricer-tab)
+   - 7.9 [Arbitrage Checks Tab](#79-arbitrage-checks-tab)
 8. [Arbitrage Checks — Mathematics](#8-arbitrage-checks--mathematics)
    - 8.1 [Calendar Spread Check](#81-calendar-spread-check)
    - 8.2 [Butterfly Spread Check](#82-butterfly-spread-check)
@@ -31,18 +33,27 @@ a Bloomberg OVME Excel snapshot.  Built with Python, Streamlit, and Plotly.
 9. [Surface Interpolation](#9-surface-interpolation)
 10. [Local Volatility — Theory & Implementation](#10-local-volatility--theory--implementation)
     - 10.1 [Dupire Formula](#101-dupire-formula)
-    - 10.2 [Why SVI?](#102-why-svi)
+    - 10.2 [Why per-slice SVI?](#102-why-per-slice-svi)
     - 10.3 [Numerical Pipeline](#103-numerical-pipeline)
-11. [Module Reference](#11-module-reference)
-12. [Test Suite](#12-test-suite)
-13. [Known Limitations & Data Notes](#13-known-limitations--data-notes)
-14. [Future Extensions](#14-future-extensions)
+11. [Heston Stochastic Volatility — Theory & Implementation](#11-heston-stochastic-volatility--theory--implementation)
+    - 11.1 [Model Dynamics](#111-model-dynamics)
+    - 11.2 [Semi-Analytic Pricing](#112-semi-analytic-pricing)
+    - 11.3 [Calibration Strategy](#113-calibration-strategy)
+    - 11.4 [Monte Carlo Scheme](#114-monte-carlo-scheme)
+12. [Yield Curve — Theory & Implementation](#12-yield-curve--theory--implementation)
+    - 12.1 [Data Source](#121-data-source)
+    - 12.2 [Bootstrap](#122-bootstrap)
+    - 12.3 [Interpolation](#123-interpolation)
+    - 12.4 [Use in Pricing](#124-use-in-pricing)
+13. [Module Reference](#13-module-reference)
+14. [Test Suite](#14-test-suite)
+15. [Known Limitations & Data Notes](#15-known-limitations--data-notes)
 
 ---
 
 ## 1. Overview
 
-This tool has two equal primary functions:
+This tool has three primary functions:
 
 1. **Implied Volatility Surface Explorer** — loads a Bloomberg OVME implied
    volatility matrix from an Excel workbook, builds a smooth bicubic-spline
@@ -50,11 +61,22 @@ This tool has two equal primary functions:
    independent no-arbitrage checks run automatically and flag any violations
    with coloured badges and downloadable reports.
 
-2. **Local Volatility Monte Carlo Pricer** — fits Gatheral SVI to each expiry
-   slice, applies the full Dupire formula (total-variance form with PCHIP
-   derivatives and a T=0 anchor) to extract a dense local vol surface, then
-   prices European vanilla, digital, and barrier options (calls and puts)
-   using a batched log-Euler Monte Carlo simulation with adaptive convergence.
+2. **Local Volatility Monte Carlo Pricer** — fits Gatheral SVI per expiry
+   slice (the per-slice fit family Bloomberg OVME's LV surface uses, vs the
+   global SSVI alternative), applies the full Dupire formula (total-variance
+   form with PCHIP derivatives and a T=0 anchor) to extract a dense local
+   vol surface, then prices European vanilla, digital, barrier, and
+   one-touch options (calls and puts) using a batched log-Euler Monte Carlo
+   simulation with adaptive convergence.  The MC layer uses discrete
+   monitoring (one check per Euler step, no Brownian-bridge correction), so
+   short-dated barrier and one-touch prices carry a known under-detection
+   bias against Bloomberg's PDE-based OVME.
+
+3. **Heston Stochastic Volatility Pricer** — calibrates the five Heston
+   parameters (v₀, κ, θ, ξ, ρ) to the market IV surface using differential
+   evolution, prices vanilla Europeans via semi-analytic Fourier inversion,
+   and prices exotic payoffs (digital, barrier, one-touch) via
+   full-truncation Euler Monte Carlo.
 
 The app supports a **daily file workflow**: place one Bloomberg Excel file per
 day in the `data_vol_surface/` folder and switch between dates directly in the
@@ -64,8 +86,8 @@ The bundled dataset covers the **S&P 500 Index (SPX)** with:
 
 | Property | Value |
 |---|---|
-| Available snapshots | 14 Apr 2026 |
-| Near-term forward | ~6 785 |
+| Available snapshots | 14 Apr 2026, 20 Apr 2026 |
+| Near-term forward | ~6 785 (14 Apr) / ~7 117 (20 Apr) |
 | Expiry range | Next day → 17 Dec 2032 (33 slices) |
 | Moneyness levels | 60 % · 80 % · 90 % · 95 % · 97.5 % · 100 % · 102.5 % · 105 % · 110 % · 120 % · 130 % · 140 % (12 levels) |
 | IV range | ~10 % → ~70 % |
@@ -84,7 +106,11 @@ The bundled dataset covers the **S&P 500 Index (SPX)** with:
 | **SVI fitting** | Fits `w(x) = a + b·(ρ·(x−m) + √((x−m)²+σ²))` per expiry slice; displays 5 parameters and residual in a table |
 | **Term structure** | ATM implied vol vs time-to-expiry on a log(T) x-axis |
 | **Heatmap** | Colour-coded IV matrix with annotated values |
-| **Dupire local vol** | Full Gatheral-formulation local vol surface via SVI analytical derivatives and PCHIP dw/dT; three sub-views (3-D surface, LV vs IV slice, ATM term structure) |
+| **Dupire local vol** | Full Gatheral-formulation local vol surface built from per-expiry SVI fits (the per-slice fit family Bloomberg OVME uses, not the global SSVI alternative) with analytical x-derivatives and PCHIP dw/dT; three sub-views (3-D surface, LV vs IV slice, ATM term structure) |
+| **Heston calibration** | Fits the five Heston parameters (v₀, κ, θ, ξ, ρ) to the market IV surface via differential evolution + L-BFGS-B polish; configurable maturity and moneyness filters |
+| **Heston pricing** | Semi-analytic European call/put via Fourier inversion (Albrecher formulation); full-truncation Euler MC for vanilla, digital, barrier, and one-touch payoffs |
+| **One-touch pricing** | Pay-at-hit one-touch (FX market convention) — up or down direction — under both Dupire LV and Heston engines, with per-path discount from hit time τ |
+| **Yield curve** | Auto-fetches the US Treasury CMT par yield curve from treasury.gov for the snapshot date, bootstraps to continuous-compounded zero rates (T-bills passed through, T-notes solved by recursive coupon-bond bootstrap), and exposes an editable 9-tenor table for user overrides.  All pricing and arbitrage checks consume `r(T)` per option maturity via log-linear interpolation in discount-factor space. |
 | **Arbitrage checks** | Calendar spread, butterfly spread, and vertical spread checks with severity scores |
 | **Violation overlay** | Select any expiry to see its smile with violations marked directly on the chart |
 | **Export** | Download violation reports as a multi-sheet Excel file |
@@ -96,21 +122,29 @@ The bundled dataset covers the **S&P 500 Index (SPX)** with:
 ```
 vol_surface_excel/
 ├── data_vol_surface/                  # One Bloomberg Excel file per snapshot date
-│   └── vol_surface_14_04_2026.xlsx
+│   ├── vol_surface_14_04_2026.xlsx
+│   └── vol_surface_20_04_2026.xlsx
 ├── pyproject.toml                     # uv / PEP 517 project config
 ├── README.md
 ├── src/
 │   ├── data_loader.py        # Excel ingestion, validation, long-format output
-│   ├── iv_surface_builder.py    # Grid interpolation (bicubic spline) + SVI fitting
-│   ├── montecarlo.py         # Monte Carlo pricer (vanilla / digital / barrier, call or put) via Dupire local vol
-│   ├── local_vol.py          # Dupire local vol via SVI + PCHIP
+│   ├── iv_surface_builder.py    # Grid interpolation (bicubic spline) + per-slice SVI overlay
+│   ├── montecarlo.py         # Monte Carlo pricer (vanilla / digital / barrier / one-touch) via Dupire local vol
+│   ├── local_vol.py          # Dupire local vol via per-slice SVI + PCHIP dw/dT
+│   ├── heston.py             # Heston model: characteristic function, Fourier pricing, calibration, MC
+│   ├── rates.py              # US Treasury yield curve fetch, bootstrap, log-DF interpolation
+│   ├── dividends.py          # Implied dividend curve via parity extraction from Bloomberg forwards
 │   ├── plots.py              # All Plotly chart functions
 │   ├── arbitrage_checks.py   # Calendar / butterfly / vertical checks
 │   └── streamlit_app.py      # UI entry-point
 └── tests/
     ├── test_data_loader.py
     ├── test_surface_builder.py
-    └── test_arbitrage_checks.py
+    ├── test_arbitrage_checks.py
+    ├── test_heston.py        # Black-76, CF, pricing, smile, Heston MC + OT (38 tests)
+    ├── test_montecarlo.py    # Dupire LV one-touch tests (10 tests)
+    ├── test_rates.py         # BEY conversion, coupon-bond bootstrap, log-DF interp, 4Y interp post-fill (36 tests)
+    └── test_dividends.py     # Implied div extraction, OLS canonical-tenor fit, calibration q-invariance (29 tests)
 ```
 
 **Data flow:**
@@ -119,13 +153,13 @@ vol_surface_excel/
 data_vol_surface/*.xlsx   (or uploaded file)
           │
           ▼
-   data_loader.py  ──────────────────────────────────┐
-          │                                           │
-          ▼                                           ▼
- iv_surface_builder.py                            local_vol.py
-          │                                           │    \
-          └──────────────────┬────────────────────────┘     ▼
-                             ▼                         montecarlo.py
+   data_loader.py  ─────────────────────────────────────────────┐
+          │                                                      │
+          ▼                                                      ▼
+ iv_surface_builder.py ─────────► heston.py              local_vol.py
+          │                           │                          │    \
+          └──────────────────┬────────┴──────────────────────────┘     ▼
+                             ▼                                    montecarlo.py
                          plots.py  ◄──  arbitrage_checks.py
                              │
                              ▼
@@ -142,7 +176,7 @@ data_vol_surface/*.xlsx   (or uploaded file)
 | pandas | ≥ 2.2 | Data wrangling |
 | numpy | ≥ 1.26 | Numerical arrays |
 | openpyxl | ≥ 3.1 | Excel I/O |
-| scipy | ≥ 1.13 | Spline interpolation, PCHIP, Black-76, SVI optimisation |
+| scipy | ≥ 1.13 | Spline interpolation, PCHIP, Black-76, per-slice SVI optimisation |
 | plotly | ≥ 5.22 | Interactive charts |
 | streamlit | ≥ 1.35 | Web UI |
 
@@ -228,7 +262,7 @@ format:
 | Row | Content |
 |---|---|
 | 1 | Headers: `Exp Date` · `ImpFwd` · `60.0%` · `80.0%` · … · `140.0%` |
-| 2 | Absolute strike prices per moneyness level (reference only — skipped by the parser) |
+| 2 | Absolute strike prices per moneyness level — used by the loader to recover the spot via `S = median(K_i / m_pct_i)` (more accurate than the earliest forward) |
 | 3 + | Data: expiry date string · forward price · implied vols in % |
 
 ### Column definitions
@@ -261,7 +295,8 @@ before storing them internally (so `22.03` → `σ = 0.2203`).
 | **Upload a workbook** | — | Upload any Bloomberg OVME `.xlsx` file; overrides the folder selector |
 | **Select daily file** | Most recent | Dropdown of all files in `data_vol_surface/`, sorted most-recent-first; disabled while a file is uploaded |
 | **Snapshot date** | Today | Date used to compute time-to-expiry: `T = (expiry_date − snap_date).days / 365.25` |
-| **Risk-free rate r (%)** | 4.5 % | Discount rate used in Black-76 call pricing for the vertical spread check and MC pricer |
+| **Rate curve** | Bootstrapped from US Treasury CMT on the snap date | Editable 10-tenor zero-rate table (1M, 2M, 3M, 4M, 6M, 1Y, 2Y, 3Y, 4Y, 5Y).  Auto-fetched from treasury.gov for the snapshot date and bootstrapped to continuous-compounded zeros; the 4Y row (which CMT doesn't publish) is filled by log-DF interpolation between 3Y and 5Y.  User can override any cell.  See [§12](#12-yield-curve--theory--implementation). |
+| **Dividend curve** | Implied from Bloomberg forwards and the rate curve | Editable 10-tenor table at the same canonical tenors as the rate curve.  Values come from an OLS line `q(T) = a + b·T` fit (T-weighted) to all per-expiry parity-implied points `q = r(T) − ln(F(T)/S)/T` with `T ≥ 1/52`.  The fit is dominated by the long end where dividend timing has averaged out, so the displayed term structure is smooth.  Editor remounts (and re-fills from the OLS) whenever a rate cell is edited, since `q` is *implied from* `r`.  See `src/dividends.py` for the parity-extraction and OLS details. |
 | **Moneyness range (%)** | 80 % – 120 % | Filter applied to the smile slices and arbitrage flag charts |
 
 After loading, five metric cards at the top of the page show: **Ticker**,
@@ -353,7 +388,7 @@ formal arbitrage checks.
 
 ---
 
-### 7.6 Local Volatility Tab
+### 7.6 LV Surface Tab
 
 Displays the **Dupire local volatility surface** derived from the implied vol
 data.  See [Section 10](#10-local-volatility--theory--implementation) for the
@@ -402,7 +437,7 @@ it.  This is the classic relationship between the two surfaces.
 
 ---
 
-### 7.7 MC Pricer Tab
+### 7.7 LV MC Pricer Tab
 
 Prices European options on the Dupire local vol surface via Monte Carlo
 simulation.  The local vol grid (resolution 100) is shared with the Local
@@ -410,27 +445,30 @@ Volatility tab — no extra compute if already cached.
 
 **Supported payoffs:**
 
-| Option type | Style | Combinable with |
+| Payoff family | Variants | Combinable with |
 |---|---|---|
-| Call / Put | Vanilla | Barrier (up/down × in/out, American or European monitoring) |
-| Call / Put | Digital (cash-or-nothing) | — (digitals pay only on terminal ITM; barrier controls are hidden in the UI) |
+| Vanilla | Call / Put | Barrier (up/down × in/out, American or European monitoring) |
+| Digital (cash-or-nothing) | Call / Put | — (digitals pay only on terminal ITM; barrier controls are hidden in the UI) |
+| One-Touch | Up / Down | — (the OT *is* a barrier product; pay-at-hit, FX market convention) |
 
 **Inputs:**
 
 | Input | Default | Description |
 |---|---|---|
-| **Option type** | Call | Segmented control: `Call` or `Put` |
-| **Digital** | Off | Toggle — when on, payoff becomes cash-or-nothing (fixed amount if ITM at expiry, else 0).  Mutually exclusive with barriers: the Barrier controls are hidden while Digital is on. |
-| **Cash payout** (digital only) | 1.0 | Amount paid when `S_T` is ITM at expiry |
-| **Barrier** | None | Segmented control: `None`, `Up-and-Out`, `Up-and-In`, `Down-and-Out`, `Down-and-In` |
-| **Barrier level B** (barrier only) | S₀ × 1.10 (up) or 0.90 (down) | Absolute barrier level |
+| **Payoff** | Vanilla | Segmented control: `Vanilla` / `Digital` / `One-Touch` |
+| **Option type** (vanilla / digital) | Call | Segmented control: `Call` or `Put` |
+| **Direction** (one-touch only) | Up | Segmented control: `Up` (B above spot) or `Down` (B below spot) |
+| **Cash payout** (digital / one-touch) | 1.0 | For digital: paid at expiry if ITM.  For OT: paid on first barrier touch (pay-at-hit). |
+| **Barrier** (vanilla only) | None | `None`, `Up-and-Out`, `Up-and-In`, `Down-and-Out`, `Down-and-In` |
+| **Barrier level B** (barrier or OT) | S₀ × 1.10 (up) or 0.90 (down) | Absolute barrier level |
 | **Barrier monitoring** (barrier only) | American | `American` (every Euler step) or `European` (terminal spot only) |
 | **Spot S₀** | From dataset | Pre-filled from the loaded Bloomberg snapshot |
-| **Strike K** | ATM (= S₀) | Absolute strike level |
-| **Maturity T (years)** | 1.0000 | Option maturity; step 0.0025 yr ≈ 1 day; surface min ~0.04 yr |
-| **Dividend yield q (%)** | 0.000 | Continuous dividend yield; 3 decimal places |
+| **Strike K** (vanilla / digital) | ATM (= S₀) | Absolute strike level — hidden for OT |
+| **Maturity T (years)** | 1.0000 | Option maturity entered to 4 decimals (e.g. 0.0822 ≈ 30 days); surface min `_T_MIN_CUTOFF`, currently `14 / 365` ≈ 14 days |
+| **Risk-free rate r (%)** | from curve at T | Reads `r(T)` off the bootstrapped Treasury curve by default; uncheck "Use curve r at T" to enter a flat scalar manually |
+| **Dividend yield q (%)** | from curve at T | Reads `q(T)` off the parity-implied dividend curve by default; uncheck "Use curve q at T" to enter a flat scalar manually |
 | **Steps per year** | 252 (daily) | Euler discretisation steps; alternative: 52 (weekly) |
-| **Convergence ε** | 0.001 | Relative stopping threshold |
+| **Convergence ε** | 0.001 | Relative stopping threshold; capped at 0.01 (1 %) — looser tolerances are not useful in practice (95 % CI half-width ≈ 2 %) |
 
 The risk-free rate is shared with the sidebar (same value used for the
 arbitrage checks).
@@ -444,28 +482,122 @@ arbitrage checks).
   hit / no-hit).  A knock-out option then behaves like a vanilla one with a
   payoff extinguished only if the terminal spot breaches the barrier.
 
+**One-touch convention (pay-at-hit).**
+
+The cash payout is delivered **the moment** spot first touches the barrier,
+discounted from the hit time `τ` back to today: `PV = E[e^{−rτ}·X·1{hit}]`.
+This is the standard FX-market convention.  Internally the MC tracks a
+per-path `first_hit_step` (initialised to −1 for "not hit", set to the
+step index of the first crossing) and applies a path-specific discount at
+payoff time rather than the global `e^{−rT}`.  Day-zero hits (spot already
+past the barrier at inception) discount with `τ = 0`, so the price equals
+the cash payout exactly with no discount.  Monitoring is American only
+(European-monitored OT degenerates into a digital and isn't a real product).
+
 **Convergence rule:**
 
-Paths run in batches of 500.  After each batch, stop when:
+Paths run in batches of 500.  After each batch, stop when the running
+relative standard error meets the precision target:
 
 ```
-|P(n) − P(n−500)| / max(P(n), 1e-8) < ε   and   n ≥ 5 000
+SE(n) / max(|P(n)|, 1e-8) < ε   and   n ≥ 5 000
 ```
 
-Hard cap: 50 000 paths.
+`SE(n)` is computed from the running variance of antithetic *pair averages*
+`Y_j = (X_a + X_b)/2` (each batch contains 250 such pairs, with `X_a` and
+`X_b` driven by `Z` and `−Z` respectively): `Var(P̂) = Var(Y) / M` where
+`M = N/2` is the pair count.  This captures the antithetic correlation
+correctly — for a vanilla call where the pair correlation `ρ_pair ≈ −0.95`,
+the pair-aware SE is ~5× tighter than the marginal SE; for digital /
+one-touch payoffs `ρ_pair ≈ 0` and the two coincide.  This is a true 1-σ
+half-width bound on the estimator, not a batch-to-batch stability check.
+Hard cap: 200 000 paths.
 
 **Surface coverage warnings** are shown before running if the strike moneyness
 or maturity falls outside the local vol surface domain.  A barrier sanity
 check warns if the barrier is on the wrong side of spot at inception.
 
 **Outputs:** Price (label dynamically reflects flavour and style, e.g.
-"(American) Up-and-Out Digital Call Price") · Standard error · 95%
+"(American) Up-and-Out Digital Call Price" or "Up One-Touch Price") ·
+Standard error · 95%
 confidence interval · Paths simulated · Convergence badge (green = converged,
 amber = cap reached) · % of steps clamped to the surface boundary.
 
 ---
 
-### 7.8 Arbitrage Checks Tab
+### 7.8 Heston Pricer Tab
+
+Calibrates the five Heston stochastic-volatility parameters to the full market
+IV surface, then prices European (Fourier) and exotic (Monte Carlo) options
+under that calibrated measure.  See
+[Section 11](#11-heston-stochastic-volatility--theory--implementation) for the
+mathematical details.
+
+**Calibration controls:**
+
+| Control | Default | Description |
+|---|---|---|
+| **Min T (years)** | 0.05 (≈ 18 days) | Excludes ultra-short expiries where smile noise dominates |
+| **Moneyness range (%)** | 70 – 130 | Restricts the fit to liquid strikes; deep-OTM points are removed |
+| **Run calibration** | — | Launches differential evolution + L-BFGS-B polish on the filtered surface |
+
+Calibration typically takes **~60–90 s** on a filtered SPX surface (~400
+points after filters).  Parameters and fit quality are cached for the duration
+of the session so subsequent pricing does not re-calibrate.
+
+**Calibrated parameters:**
+
+Five metric cards display the best-fit values with useful transforms in the
+subtitle:
+
+| Metric | Meaning | Subtitle |
+|---|---|---|
+| **v₀** | Initial variance | σ₀ = √v₀ (equivalent spot vol) |
+| **κ** | Mean-reversion speed of variance | — |
+| **θ** | Long-run variance | σ∞ = √θ (equivalent long-term vol) |
+| **ξ** | Vol-of-vol | — |
+| **ρ** | Spot–vol correlation | — |
+
+Below the metrics three diagnostic badges are shown:
+
+- **RMSE (pp)** — root-mean-square IV error on the calibrated region
+  (filtered by Min T and moneyness range), expressed in percentage points
+- **MaxErr (pp)** — worst single-point IV error on the calibrated region
+- **Feller** — green if `2κθ > ξ²` (variance stays strictly positive under
+  the SDE), amber if violated (variance can touch zero; the MC scheme uses
+  full truncation to handle this safely)
+
+Two sub-tabs are available:
+
+#### Smile Fits
+
+Side-by-side comparison of the market SVI smile and the calibrated Heston
+smile for a selected expiry.  Market vols (from the dense IV surface) appear
+as markers; the Heston model smile is overlaid as a solid line.  Residuals
+are shown beneath as a thin strip.  Useful for spotting whether the global
+fit is biased systematically at certain maturities.
+
+#### MC Pricer
+
+Same payoff menu as the [LV MC Pricer tab](#77-lv-mc-pricer-tab) (vanilla /
+digital / barrier × call / put × American / European monitoring, plus
+one-touch up/down with pay-at-hit cash settlement), but paths are generated
+from the full-truncation Heston Euler scheme instead of the Dupire local vol
+surface.
+
+For **vanilla European calls and puts**, the semi-analytic Fourier price is
+also shown (no simulation noise); compare it to the MC price to gauge
+convergence.  For digitals, barriers, and one-touch, only the MC price is
+available — none of these payoffs has a closed-form Heston counterpart in
+this codebase.
+
+Outputs mirror the Dupire tab: price, standard error, 95 % CI, paths
+simulated, convergence badge.  There is no boundary-clamping metric here
+because the Heston scheme does not rely on a finite grid.
+
+---
+
+### 7.9 Arbitrage Checks Tab
 
 Three independent no-arbitrage conditions are tested automatically each time
 the risk-free rate slider is moved.  Results are displayed as:
@@ -516,28 +648,35 @@ shorter-dated total variance.
 
 ### 8.2 Butterfly Spread Check
 
-**Economic intuition:** a butterfly spread (long ITM + long OTM − 2 × ATM)
-has value equal to the second derivative of the call price with respect to
-strike scaled by K².  A negative value implies a negative risk-neutral
-probability density, which is impossible for any valid probability measure.
+**Economic intuition:** the value of an infinitesimal butterfly spread is
+proportional to `d²C/dK²`, which by the Breeden–Litzenberger identity equals
+`e^{-rT}·f(K, T)` where `f` is the risk-neutral density of the terminal
+spot.  A density must be non-negative, so call prices must be convex in
+strike at every expiry.  Convexity of the *implied vol* in `K` is **neither
+necessary nor sufficient** — typical equity put-skews are concave in `K`
+on the put wing yet entirely arbitrage-free, so an IV-space convexity test
+flags false positives and misses real arbitrages.
 
-**Condition:** implied vol must be convex in moneyness at every interior
-strike:
-
-```
-d²IV / dK² ≥ 0   for all interior K at each expiry T
-```
-
-**Implementation:** non-uniform centred finite differences are used because
-the moneyness grid is non-uniform (60, 80, 90, 95, 97.5, 100, 102.5, 105, 110, 120, 130, 140):
+**Condition:**
 
 ```
-d²IV/dK²  ≈  2 / (h₁ + h₂)  ×  [IV(K+h₂)/h₂  −  IV(K)·(1/h₁ + 1/h₂)  +  IV(K−h₁)/h₁]
+d²C / dK² ≥ 0   for all interior K at each expiry T
 ```
 
-where `h₁ = K − K_prev` and `h₂ = K_next − K`.
+**Implementation:** convert each slice's quoted IVs to Black-76 call prices
+using the slice-specific zero rate `r(T)` from the rate curve, then apply a
+non-uniform centred finite second difference (the moneyness grid is non-
+uniform: 60, 80, 90, 95, 97.5, 100, 102.5, 105, 110, 120, 130, 140):
 
-**Tolerance:** violations are reported only when `d²IV/dK² < −1×10⁻⁴` to
+```
+d²C/dK²  ≈  2/(h₁+h₂)  ×  [C(K+h₂)/h₂  −  C(K)·(1/h₁ + 1/h₂)  +  C(K−h₁)/h₁]
+```
+
+where `h₁ = K − K_prev` and `h₂ = K_next − K` are absolute strike gaps
+(Breeden–Litzenberger lives in `K`-space, so we work with `K = m_pct/100·F`
+not the moneyness percentage).
+
+**Tolerance:** violations are reported only when `d²C/dK² < −1×10⁻⁴` to
 account for bid-ask spread noise.
 
 ---
@@ -639,7 +778,7 @@ g(0, T) = 1 + ¼·(∂w/∂x)²·(−¼ − 1/w)  +  ½·(∂²w/∂x²)
 
 Both the skew term `(∂w/∂x)²` and curvature term `(∂²w/∂x²)` contribute.
 
-### 10.2 Why SVI?
+### 10.2 Why per-slice SVI?
 
 With only ~12 moneyness quotes per expiry (60 %–140 % in the Bloomberg sheet),
 numerical second derivatives of the implied vol smile are highly sensitive to
@@ -647,13 +786,35 @@ the non-uniform strike spacing.  The cluster around 95–100 % causes
 `CubicSpline` to produce wild `d²w/dx²` values, making the denominator `g`
 ill-conditioned.
 
-Instead, we fit a **Gatheral SVI** parametric smile per expiry slice:
+Two parametric alternatives exist:
+
+  · **Per-slice SVI** (Gatheral): five parameters `(a, b, ρ, m, σ)` per
+    expiry.  Each slice is fit independently and retains its own shape
+    — that is what produces the front-end skew bumps and off-ATM
+    curvature variation visible in Bloomberg OVME's local-vol surface.
+    No cross-slice constraint, so adjacent slices can in principle
+    cross in `w(·, T)` (calendar arbitrage); in practice this is rare
+    on real Bloomberg quotes and the Dupire formula flags any
+    occurrence as `g ≤ 0`, which we mask to NaN.
+  · **SSVI** (Surface SVI, Gatheral–Jacquier 2014): one ATM curve `θ(T)`
+    plus three globals `(ρ, η, γ)` shared across all expiries, with
+    `θ·φ(θ)·(1+|ρ|) ≤ 4` and monotone `θ(T)` giving calendar / butterfly
+    no-arb by construction.  Theoretically clean but only `3 + N_T`
+    degrees of freedom for the entire surface — per-slice idiosyncrasies
+    get averaged into one global skew function and disappear.  The
+    resulting LV surface is visibly too smooth versus a desk-grade
+    benchmark like Bloomberg OVME.
+
+We use **per-slice SVI** here, matching Bloomberg's choice and most
+production desks.
+
+The SVI form per slice:
 
 ```
 w(x) = a + b · (ρ·z + √(z² + σ²))    where z = x − m
 ```
 
-The analytical derivatives are:
+Analytical x-derivatives:
 
 ```
 ∂w/∂x   = b · (ρ + z/d)              where d = √(z² + σ²)
@@ -668,15 +829,18 @@ differences.
 
 The local vol computation proceeds in four steps:
 
-**Step 1 — SVI fit per expiry (x-derivatives)**
+**Step 1 — Per-slice SVI fit (x-derivatives)**
 
 For each of the `N_T` raw expiry slices, fit SVI parameters `{a, b, ρ, m, σ}`
-by minimising the least-squares residual.  Evaluate `w`, `∂w/∂x`, `∂²w/∂x²`
+by minimising relative squared error.  Five SPX-flavoured starts feed
+L-BFGS-B; the best residual wins.  Evaluate `w`, `∂w/∂x`, `∂²w/∂x²`
 analytically on a fine grid of 200 log-moneyness points `x_fine`.
 
-If the SVI fit fails (residual too large or `w ≤ 0`), fall back to
-linear interpolation of raw `w` values plus numerical `np.gradient` for
-the derivatives.
+If a slice's SVI fit is poor (mean relative squared error > 0.04, or
+fitted `w` not strictly positive on the fine grid), fall back to linear
+interpolation of raw `w` plus numerical `np.gradient` for the derivatives.
+This preserves local fidelity to the noisy quotes rather than forcing a
+bad parametric fit.
 
 **Step 2 — PCHIP for dw/dT (T-derivatives)**
 
@@ -721,7 +885,287 @@ matters most for short-dated option pricing.
 
 ---
 
-## 11. Module Reference
+## 11. Heston Stochastic Volatility — Theory & Implementation
+
+### 11.1 Model Dynamics
+
+The Heston (1993) model posits that the spot price `S_t` and its instantaneous
+variance `v_t` follow the joint SDE
+
+```
+dS_t  = (r − q) · S_t · dt  +  √v_t · S_t · dW_t^S
+dv_t  = κ · (θ − v_t) · dt  +  ξ · √v_t · dW_t^v
+⟨dW^S, dW^v⟩ = ρ · dt
+```
+
+with five free parameters:
+
+| Symbol | Role | Typical sign / range |
+|---|---|---|
+| **v₀** | Initial variance | ≥ 0 |
+| **κ** | Speed of mean reversion of `v` toward `θ` | > 0 |
+| **θ** | Long-run variance | > 0 |
+| **ξ** | Vol-of-vol (diffusion coefficient of `v`) | > 0 |
+| **ρ** | Correlation between spot and variance shocks | typically < 0 for equities |
+
+The **Feller condition** `2κθ > ξ²` guarantees that `v_t` stays strictly
+positive almost surely; when it is violated, `v_t` can reach zero but cannot
+become negative thanks to the `√v` diffusion.  The app reports Feller status
+explicitly and uses a full-truncation scheme for MC to handle either regime.
+
+### 11.2 Semi-Analytic Pricing
+
+Under Heston, European call prices admit the closed-form representation
+
+```
+C(S, K, T) = S · e^(−qT) · P₁  −  K · e^(−rT) · P₂
+```
+
+where `P₁` and `P₂` are risk-neutral probabilities obtained by Fourier
+inversion of the characteristic function `f_j(u; T, x, v)`:
+
+```
+P_j = ½ + (1/π) · ∫₀^∞ Re[ e^(−i u ln K) · f_j(u) / (i · u) ] du     (j = 1, 2)
+```
+
+This implementation uses the **Albrecher et al. (2007) "little trap"**
+formulation of the characteristic function, which avoids the branch-cut
+instability of the original Heston form across the complex square root of
+`d(u)`.  Its closed form is:
+
+```
+f_j(u) = exp( C_j(u, T) + D_j(u, T) · v₀ + i · u · x )
+
+where x = ln(S) + (r − q)·T
+
+C_j(u, T) = (r − q) · i · u · T
+          + (κθ / ξ²) · [ (b_j − ρξiu − d) · T
+                          − 2 · ln((1 − c · e^(−dT)) / (1 − c)) ]
+
+D_j(u, T) = [(b_j − ρξiu − d) / ξ²] · (1 − e^(−dT)) / (1 − c · e^(−dT))
+
+d   = √( (ρξiu − b_j)²  −  ξ² · (2·u_j·iu − u²) )
+c   = (b_j − ρξiu − d) / (b_j − ρξiu + d)
+
+u_1 = +½,  b_1 = κ − ρξ
+u_2 = −½,  b_2 = κ
+```
+
+Puts are priced by put-call parity:
+
+```
+P = C  −  S·e^(−qT)  +  K·e^(−rT)
+```
+
+The Fourier integral is computed numerically via `scipy.integrate.quad` with
+generous absolute and relative tolerances (`1e-8`); a warm-up call amortises
+JIT / import overhead across batched pricing.  A vectorised routine prices an
+entire smile (one T, many K) in a single pass by re-using the CF evaluation.
+
+### 11.3 Calibration Strategy
+
+The calibration minimises a **vega-weighted price error** objective across
+the filtered market surface:
+
+```
+minimise  Σ_{i} [ (C_model(K_i, T_i) − C_market(K_i, T_i)) / vega_i ]²
+```
+
+Since `ΔC ≈ vega · Δσ` to first order, dividing the price error by each
+point's Black-76 vega converts price RMSE into an approximate **implied vol
+RMSE** — so the optimiser effectively fits the surface in IV space without
+paying the cost of a Newton inversion at every point during the search.
+
+**Vega floor:** extremely deep OTM points have `vega ≈ 0`, which would
+explode their weight in the objective.  A **single global 25th-percentile
+floor** is applied: any point whose raw vega falls below that level is
+clipped to the floor (so the *weight* `1/vega` is capped from above),
+preventing noise from dominating the fit.  With the T / moneyness filters
+already applied upstream, a per-slice floor offered no additional benefit
+and is harder to defend than one transparent global scalar.
+
+**Filters:**
+
+| Filter | Default | Purpose |
+|---|---|---|
+| **Min T** | 0.05 yr (≈ 18 days) | Drops ultra-short expiries where smile noise and event premia dominate |
+| **Moneyness range** | 70 % – 130 % | Drops deep-OTM and deep-ITM quotes with negligible vega or illiquid pricing |
+
+Filters are configurable in the sidebar.  The reported RMSE and MaxErr refer
+to the **calibrated region only**.
+
+**Optimiser:** SciPy's `differential_evolution` (global, stochastic) with
+parameter bounds
+
+```
+v₀ ∈ [0.001, 0.50]   κ ∈ [0.1, 10.0]   θ ∈ [0.001, 0.50]
+ξ  ∈ [0.05, 3.0]     ρ ∈ [−0.99, 0.20]    (equity skew is always negative)
+```
+
+followed by an automatic L-BFGS-B polish from the DE best point (`polish=True`).
+The initial population is seeded via `x0 = [σ_ATM_front², 2.0, σ_ATM_long², 0.5,
+−0.70]` — a crude but effective warm start built from the front-month and
+long-dated ATM implied vols.  Typical wall-clock time on the bundled SPX
+surface (filtered to ~400 points) is **~60–90 s**.  To keep the DE inner loop
+tractable, at most `max_slices=12` expiries are used for fitting (evenly
+spaced across the filtered range); the final fit-quality report is then
+re-evaluated on the **full** surface with a finer 1000-point φ-grid.
+
+### 11.4 Monte Carlo Scheme
+
+Both Fourier and MC prices are available for vanilla European payoffs, but
+digital and barrier options are priced exclusively by MC.  The scheme is the
+**full-truncation Euler discretisation** of Lord–Koekkoek–van Dijk (2010),
+which handles violated-Feller regimes robustly by setting `max(v_t, 0)`
+wherever the variance process would otherwise go negative:
+
+```
+v_{t+Δt} = v_t + κ·(θ − v_t^+)·Δt  +  ξ·√(v_t^+)·√Δt · Z_v
+S_{t+Δt} = S_t · exp[ (r − q − ½·v_t^+)·Δt  +  √(v_t^+)·√Δt · Z_S ]
+
+where v_t^+ = max(v_t, 0)
+      Z_S, Z_v ~ bivariate normal with correlation ρ
+```
+
+Running accumulators of antithetic *pair averages* `Y_j = (X_a + X_b)/2` are
+used in place of a growing Python list, so memory stays constant as paths are
+added.  The pair-aware running SE absorbs the antithetic correlation
+correctly (see the LV MC section above for the derivation).  Each batch of
+500 paths is drawn as 250 jointly-negated `(Z₁, Z₂)` Gaussian trajectories,
+which preserves the `(ρ, √(1−ρ²))` rotation while flipping the sign of every
+Brownian increment.  The same SE-based precision rule as the Dupire MC applies:
+
+```
+SE(n) / max(|P(n)|, 1e-8) < ε   and   n ≥ 5 000
+```
+
+with a hard cap of 400 000 paths and a default batch size of 500 (the cap
+is higher than the Dupire MC's 200 000 because Heston path generation is
+cheaper per step — no local-vol grid interpolation — and digital /
+one-touch payoffs routinely need the extra headroom under a true
+precision bound).
+
+For **vanilla European calls and puts**, the Fourier price serves as a
+reference — the test suite asserts that the MC price lies within `3 × SE` of
+the Fourier value, which is a strong end-to-end sanity check on both
+pipelines.
+
+---
+
+## 12. Yield Curve — Theory & Implementation
+
+A flat single risk-free rate is a poor approximation when option maturities
+span four orders of magnitude (1 day to 5+ years).  The app builds a
+proper continuously-compounded zero curve for the snapshot date and
+queries it at each option's maturity, so a 3-month digital and a 5-year
+barrier discount with their *own* rates rather than sharing a sidebar slider.
+
+### 12.1 Data Source
+
+The U.S. Department of the Treasury publishes the **Daily Treasury Par
+Yield Curve Rates** (CMT — Constant Maturity Treasury) as a CSV download
+keyed by calendar year:
+
+```
+https://home.treasury.gov/resource-center/data-chart-center/
+interest-rates/daily-treasury-rates.csv/{YYYY}/all
+    ?type=daily_treasury_yield_curve
+    &field_tdr_date_value={YYYY}
+    &page&_format=csv
+```
+
+This is the canonical, free, no-API-key source for U.S. risk-free rates.
+Each row is one business day; columns are the published tenors (1m, 2m,
+3m, 4m, 6m, 1y, 2y, 3y, 5y, 7y, 10y, 20y, 30y).  We keep only the tenors
+at or below 5y matching the project scope:
+
+```
+1M, 2M, 3M, 4M, 6M, 1Y, 2Y, 3Y, 5Y     (9 tenors)
+```
+
+The fetch is cached on the snapshot date (`@st.cache_data`) — for any
+historical date the Treasury rates never change, so the network round-trip
+happens at most once per session per file.  If the snapshot date falls on
+a weekend or holiday (Treasury doesn't publish), we use the most recent
+preceding business day.  If the fetch fails entirely (offline, future date,
+treasury.gov down), the UI falls back to a manual-entry mode pre-populated
+with a flat 4.5 % curve and shows a clear warning banner.
+
+### 12.2 Bootstrap
+
+Treasury reports yields on a **bond-equivalent** basis (semi-annual
+compounding).  Two regimes:
+
+- **T-bills** (≤ 1y) are zero-coupon — the par yield equals the zero rate.
+  Convert from BEY to continuous compounding once:
+  ```
+  r_cc = 2 · ln(1 + y_BEY / 2)
+  ```
+
+- **T-notes** (2y, 3y, 5y) are coupon bonds.  The published yield is a
+  *par yield* — the coupon rate that would price the bond at par.  We
+  bootstrap recursively in increasing maturity order: solve for the
+  continuous zero rate `r(T)` such that a semi-annual coupon bond with
+  coupon rate `y_par/2` and face value 1 prices to exactly 1.  Coupon
+  dates between previously bootstrapped knots are filled by linear
+  interpolation in `log(DF)` space using a *candidate* `r(T)` — the
+  resulting equation is then a single 1-D root in `r(T)`, solved via
+  Brent's method.
+
+The self-consistency property of the bootstrap is verified in the test
+suite: each par bond, repriced under its own bootstrapped curve, is
+within `1e-9` of par.
+
+### 12.3 Interpolation
+
+`RateCurve.zero_rate(T)` queries the curve at any maturity by linear
+interpolation in `log(DF)` space:
+
+```
+log DF(T)  =  log DF(T_below)
+            + (T − T_below) / (T_above − T_below) · (log DF(T_above) − log DF(T_below))
+```
+
+This is the **standard market convention** because it is equivalent to
+piecewise-constant forward rates between knot points — a smoother curve
+than linear-in-rates without the oscillations of a cubic spline, and the
+implied forward rates remain non-negative and well-behaved.  Beyond the
+curve range we extrapolate flat (the boundary rate), which is a
+conservative choice for European pricing.
+
+### 12.4 Use in Pricing
+
+For every option of maturity `T`, callers query `curve.zero_rate(T)` and
+use the resulting scalar `r` as a constant rate for that pricing call.
+This is option (α) in the standard taxonomy — appropriate for European
+products where rate-vol risk is not being managed separately.  The
+alternative (using instantaneous forward rates `f(t)` in the drift at
+each MC step) is more sophisticated but only matters for strongly
+path-dependent payoffs (American exercise, accrual notes); not relevant
+here.
+
+Specifically:
+
+- **MC pricing** (Dupire LV and Heston): `r = curve.zero_rate(option_T)` is
+  passed as the constant rate for the entire path.  Drift `(r − q)·dt` and
+  terminal discount `e^{−rT}` use the same single rate.
+- **Heston Fourier pricing**: same — `r` is per-option.
+- **Heston calibration**: each expiry slice is priced and discounted with
+  its own `r(T_slice)`.  Both vega-weighted price errors during DE and
+  the IV residuals reported in the detail table use the slice-appropriate
+  rate.
+- **Vertical spread arbitrage check**: each expiry slice gets its own
+  Black-76 rate when computing call prices for the no-arbitrage test.
+  The check report explicitly shows the rate range used (e.g. `r∈[4.30 %,
+  4.75 %]`).
+
+A user override of any cell in the curve table re-flows automatically
+through every pricing call: edit the 1y rate, recompute, every option
+with `T ≈ 1y` re-prices on the next click.
+
+---
+
+## 13. Module Reference
 
 ### `data_loader.py`
 
@@ -729,6 +1173,7 @@ matters most for short-dated option pricing.
 |---|---|
 | `load_workbook(path, snap_date)` | Main entry point.  Returns `VolDataset(vol_df, metadata)` |
 | `_parse_vol_surface(raw, snap)` | Melts the wide-format sheet into a tidy long DataFrame |
+| `_extract_spot_from_strike_grid(raw)` | Internal: derives the reference spot from row 1's absolute-strike grid (`S = median(K_i / m_pct_i)` across columns).  More accurate than `F(earliest)`, which differs from spot by `exp((r−q)·T_earliest)` |
 | `_extract_metadata(raw, vol_df, snap)` | Builds the metadata dict (title, ticker, spot, n_expiries, …) |
 | `validate(df)` | Returns a list of error strings; empty list = valid |
 | `VolDataset` | `namedtuple('VolDataset', ['vol_df', 'metadata'])` |
@@ -763,8 +1208,8 @@ matters most for short-dated option pricing.
 |---|---|
 | `build_local_vol(df, n_k, n_t)` | Computes the full Dupire local vol surface.  Returns `LocalVolGrid` |
 | `atm_comparison(lv_grid)` | Returns a DataFrame of ATM IV, ATM LV, and `lv/iv` ratio per expiry |
-| `_svi_fit_slice(x, w_obs)` | Internal: fits SVI to `(x, w)` pairs; returns param dict or `None` |
-| `_svi_eval(p, x)` | Internal: evaluates `(w, dw/dx, d²w/dx²)` analytically from SVI params |
+| `_svi_fit_slice(x, w_obs)` | Internal: fits Gatheral SVI to one slice's `(x, w)` pairs; returns param dict or `None` if rejected |
+| `_svi_eval(p, x)` | Internal: evaluates `(w, ∂w/∂x, ∂²w/∂x²)` analytically from SVI params at fixed T |
 | `LocalVolGrid` | `namedtuple('LocalVolGrid', ['K_grid', 'T_grid', 'LV_grid', 'IV_grid', 'moneyness', 'expiries', 'arb_mask'])` |
 
 **Key constants:**
@@ -775,7 +1220,7 @@ matters most for short-dated option pricing.
 | `_G_FLOOR` | 0.02 | Denominator guard — points with `g ≤ 0.02` are masked |
 | `_W_FLOOR` | 1e-8 | Floor on total variance `w` before computing `g` |
 | `_DWT_FLOOR` | 1e-6 | Floor on `∂w/∂T` to prevent holes from numerical noise |
-| `_T_MIN_CUTOFF` | 0.04 | ~2 weeks — very short expiries excluded (unstable derivatives) |
+| `_T_MIN_CUTOFF` | `14 / 365` | ~14 calendar days (~2 weeks) — very short expiries excluded (unstable PCHIP derivatives on too-few T-neighbours) |
 | `_N_X_FINE` | 200 | Number of log-moneyness points on the fine SVI evaluation grid |
 
 ---
@@ -795,11 +1240,45 @@ matters most for short-dated option pricing.
 
 ---
 
+### `heston.py`
+
+| Function / Class | Description |
+|---|---|
+| `heston_call(S, K, T, r, q, v0, kappa, theta, xi, rho, n_phi=1000)` | Semi-analytic European call price via Fourier inversion of the Albrecher CF (scalar K) |
+| `heston_smile(S, T, r, q, params, m_pct_grid, n_phi=1000)` | Vectorised smile: computes Heston IVs on a moneyness-% grid for one expiry in a single pass (one CF evaluation, batched across strikes); used for plotting market vs model |
+| `calibrate(vol_df, S, r, q, max_slices=12, min_T=0.05, m_range=(70.0, 130.0))` | Global calibration: DE + L-BFGS-B polish on vega-weighted price error.  Returns `HestonCalibResult` |
+| `mc_heston(params, S0, K, T, r, q, option_type, is_digital, digital_payout, barrier_type, barrier_level, barrier_style, is_one_touch, one_touch_direction, steps_per_year, eps, seed)` | Full-truncation Euler MC for vanilla / digital / barrier / one-touch payoffs (call or put).  Returns `MCResult` |
+| `_heston_cf(phi, T, v0, kappa, theta, xi, rho, j)` | Internal: Heston log-spot CF `f_j(φ)` — Albrecher "little trap" form |
+| `_heston_call_fwd_batch(F, K_arr, T, r, v0, kappa, theta, xi, rho, phi)` | Internal: vectorised call prices over strikes at fixed expiry using the market forward |
+| `_b76_call`, `_b76_vega`, `_b76_call_vec`, `_b76_vega_vec`, `_b76_iv`, `_b76_iv_vec` | Internal: Black-76 pricing, vega, and Newton-Raphson IV inversion — scalar and vectorised variants |
+| `HestonParams` | `namedtuple('HestonParams', ['v0', 'kappa', 'theta', 'xi', 'rho'])` |
+| `HestonCalibResult` | `namedtuple('HestonCalibResult', ['params', 'rmse_iv', 'max_err_iv', 'mean_err_iv', 'n_points', 'success', 'detail_df'])` — `detail_df` holds per-point market vs model IVs across the full surface |
+
+**Puts** are not a separate function — they are derived by the caller via
+put-call parity: `P = C − S·e^(−qT) + K·e^(−rT)` (see the Heston MC Pricer
+sub-tab in [streamlit_app.py](src/streamlit_app.py)).  The MC pricer
+(`mc_heston`) handles both calls and puts directly via `option_type`.
+
+**Feller condition** is computed on-demand by the caller from
+`2·κ·θ > ξ²` on the returned `HestonParams` — it is not stored in
+`HestonCalibResult` because it is a trivial one-line derivation.
+
+**Key constants:**
+
+| Constant | Value | Role |
+|---|---|---|
+| `_MC_MIN_PATHS` | 5 000 | Minimum paths before convergence can trigger |
+| `_MC_MAX_PATHS` | 400 000 | Hard cap — `converged=False` if reached (higher than Dupire MC because Heston paths are cheaper per step and digital / OT payoffs need extra headroom under the SE-based precision rule) |
+| `_MC_BATCH` | 500 | Paths per batch; also the convergence window |
+| `_MC_EPS_FLOOR` | 1e-8 | Prevents division by zero when price ≈ 0 |
+
+---
+
 ### `montecarlo.py`
 
 | Function / Class | Description |
 |---|---|
-| `price_european_option(lv_grid, S0, K, T, r, q, option_type, is_digital, digital_payout, barrier_type, barrier_level, barrier_style, steps_per_year, eps, seed)` | Runs the MC simulation for vanilla / digital / barrier options (call or put) and returns `MCResult` |
+| `price_european_option(lv_grid, S0, K, T, r, q, option_type, is_digital, digital_payout, barrier_type, barrier_level, barrier_style, is_one_touch, one_touch_direction, steps_per_year, eps, seed)` | Runs the MC simulation for vanilla / digital / barrier / one-touch options (call or put) and returns `MCResult` |
 | `_build_lv_interpolator(lv_grid)` | Internal: builds a `RegularGridInterpolator` from `LocalVolGrid`, filling NaN holes |
 | `MCResult` | `namedtuple('MCResult', ['price', 'std_error', 'n_paths', 'converged', 'clamp_pct'])` |
 
@@ -807,17 +1286,18 @@ matters most for short-dated option pricing.
 
 | Flavour | Triggered by | Payoff |
 |---|---|---|
-| Vanilla call/put | `is_digital=False`, `barrier_type=None` | `max(S_T − K, 0)` / `max(K − S_T, 0)` |
+| Vanilla call/put | `is_digital=False`, `barrier_type=None`, `is_one_touch=False` | `max(S_T − K, 0)` / `max(K − S_T, 0)` |
 | Digital call/put | `is_digital=True` | `digital_payout · 1_{S_T > K}` / `digital_payout · 1_{S_T < K}` |
 | Barrier (any of the above) | `barrier_type` ∈ `up_out`, `up_in`, `down_out`, `down_in` + `barrier_level` | Knock-in / knock-out applied to the underlying vanilla/digital payoff |
 | Barrier monitoring | `barrier_style` = `"american"` (default, every Euler step) or `"european"` (terminal spot only) | — |
+| One-touch | `is_one_touch=True`, `one_touch_direction` ∈ `"up"`, `"down"`, plus `barrier_level` and `digital_payout` | `digital_payout · e^{−r·τ} · 1{barrier hit during [0, T]}` — pay-at-hit, FX market convention.  Mutually exclusive with `is_digital` and `barrier_type`. |
 
 **Key constants:**
 
 | Constant | Value | Role |
 |---|---|---|
 | `_MIN_PATHS` | 5 000 | Minimum paths before convergence can trigger |
-| `_MAX_PATHS` | 50 000 | Hard cap — `converged=False` if reached |
+| `_MAX_PATHS` | 200 000 | Hard cap — `converged=False` if reached |
 | `_BATCH_SIZE` | 500 | Paths per batch; also the convergence window |
 | `_EPS_FLOOR` | 1e-8 | Prevents division by zero when price ≈ 0 |
 
@@ -828,35 +1308,80 @@ matters most for short-dated option pricing.
 | Function | Returns |
 |---|---|
 | `check_calendar_spread(df)` | `CheckResult` |
-| `check_butterfly_spread(df, eps)` | `CheckResult` |
-| `check_vertical_spread(df, r)` | `CheckResult` |
-| `run_all_checks(df, r)` | `list[CheckResult]` — always `[calendar, butterfly, vertical]` |
+| `check_butterfly_spread(df, r, eps)` | `CheckResult` — `r` (scalar or `RateCurve`) is required: each slice's IVs are converted to Black-76 call prices using `r(T)` and `d²C/dK²` is checked (Breeden–Litzenberger) |
+| `check_vertical_spread(df, r)` | `CheckResult` — `r` may be a scalar (flat) or a `RateCurve` (slice-by-slice) |
+| `run_all_checks(df, r)` | `list[CheckResult]` — always `[calendar, butterfly, vertical]`; `r` is required, no silent default |
 
 ```python
 CheckResult = namedtuple('CheckResult', ['name', 'passed', 'violations', 'details'])
 ```
 
 Each violation dict contains at minimum: `expiry_label`, `moneyness_pct`,
-`time_to_expiry`, `severity`, plus check-specific fields.
+`time_to_expiry`, `severity`, plus check-specific fields.  Vertical-spread
+violations also carry `r_used` (the slice-specific rate that produced the
+Black-76 call price).
 
 ---
 
-## 12. Test Suite
+### `rates.py`
 
-Tests live in `tests/` and are run with `uv run pytest tests/ -v`.
-
-| File | Tests |
+| Function / Class | Description |
 |---|---|
-| `test_data_loader.py` | Schema validation, long-format output columns, metadata extraction, time-to-expiry computation |
-| `test_surface_builder.py` | Surface grid shape, no negative vols, front-end spike preservation, 1-D interpolation |
-| `test_arbitrage_checks.py` | Calendar / butterfly / vertical check logic on synthetic data |
-
-All tests load data from `data_vol_surface/vol_surface.xlsx` (relative to the
-project root) rather than a file at the root level.
+| `RateCurve` | `NamedTuple('RateCurve', ['tenors_yr', 'zero_rates', 'source', 'snap_date_iso'])` with methods `.zero_rate(T)`, `.discount_factor(T)`, `.as_table()` |
+| `fetch_treasury_yields(snap_date, timeout=15)` | Download the Daily Treasury Par Yield Curve CSV for `snap_date.year`, locate the row matching `snap_date` (or the most recent preceding business day), return `{tenor_label: par_yield_pct}`.  Raises `TreasuryFetchError` on network/parse failure |
+| `bootstrap_zero_rates(par_yields_pct)` | T-bills passed through with BEY → continuous conversion; T-notes solved by recursive coupon-bond bootstrap with Brent's method.  Returns `{T_years: continuous zero rate}` |
+| `build_curve_from_yields(par_yields_pct, snap_date, source='treasury')` | Convenience wrapper: bootstrap + assemble a `RateCurve` |
+| `build_curve_from_zero_rates(zeros_pct, snap_date, source='manual')` | Build a `RateCurve` from already-continuous zero rates (used when the user types overrides into the sidebar table) |
+| `flat_curve(rate, snap_date)` | Constant-rate curve at every canonical tenor — fallback / test helper |
+| `get_rate(curve_or_scalar, T)` | Duck-typed accessor — returns `curve.zero_rate(T)` if it has the attribute, else `float(curve_or_scalar)`.  Used by `arbitrage_checks` and `heston.calibrate` to support both flat and curved inputs |
+| `_interp_log_df(T, tenors, rates)` | Internal: linear interpolation in `log(DF)` space (piecewise-flat forwards), with flat extrapolation outside the curve |
+| `TENORS`, `TENOR_LABELS`, `TENOR_YEARS` | Canonical tenor list: `1M, 2M, 3M, 4M, 6M, 1Y, 2Y, 3Y, 4Y, 5Y` (10 tenors).  4Y is included even though US Treasury CMT doesn't quote it — `build_curve_from_yields` post-fills it by log-DF interpolation between the surrounding bootstrapped knots |
+| `TreasuryFetchError` | Raised by `fetch_treasury_yields` on any network or parse failure |
 
 ---
 
-## 13. Known Limitations & Data Notes
+### `dividends.py`
+
+| Function / Class | Description |
+|---|---|
+| `DivCurve` | `NamedTuple('DivCurve', ['tenors_yr', 'div_yields', 'labels', 'source', 'snap_date_iso'])` with methods `.div_yield(T)` and `.as_table()`.  `labels` are tenor strings ("1M", "2M", …) for canonical-tenor curves and expiry strings for raw per-expiry extraction |
+| `extract_implied(vol_df, spot, rate_curve, snap_date, max_T)` | Per-expiry parity extraction: returns one knot per option expiry where `q(T) = r(T) − ln(F(T)/S)/T`.  Result is bumpy in the front end (Bloomberg often quotes `F(T_earliest) ≡ S` to the cent, so `q = r` artificially; ex-dividend timing jolts F at any tenor) — use the canonical-tenor extractor below for display |
+| `extract_implied_at_canonical_tenors(vol_df, spot, rate_curve, ...)` | Builds the displayed sidebar curve by fitting an OLS line `q(T) = a + b·T` (linearised: `q·T = a·T + b·T²`, naturally `T`-weighted) to all per-expiry points with `1/52 ≤ T ≤ 5y`, then evaluating at `TENOR_LABELS`.  Long-end expiries dominate the fit; the front-end `F ≡ S` artefact is filtered |
+| `build_curve_from_table(edited_df, snap_date, source)` | Reconstructs a `DivCurve` from an edited sidebar table (columns `Tenor`, `Years`, `q (%)`).  Used when the user overrides a cell |
+| `flat_div_curve(yield_value, tenors_yr, snap_date)` | Constant-yield curve at every tenor — fallback / test helper |
+| `get_div_yield(curve_or_scalar, T)` | Duck-typed accessor — returns `curve.div_yield(T)` if it has the attribute, else `float(curve_or_scalar)`.  Mirrors `rates.get_rate` |
+| `_interp_qT(T, tenors, yields)` | Internal: linear interpolation in `q·T` space (piecewise-flat instantaneous div), with flat extrapolation outside the curve |
+
+**Why `q` doesn't enter Heston calibration**: under moneyness-quoted IVs, `K = m_pct · F`, so scaling `F` by `λ = exp(−Δq·T)` scales every `K` by the same `λ`.  Heston/Black-76 prices and vegas are positively homogeneous of degree 1 in `(F, K)`, so the vega-weighted residual is invariant — calibrated parameters are bit-identical for any `q`.  `q` only matters where strikes are absolute, i.e. the MC pricers.  Regression test: `tests/test_dividends.py::TestHestonCalibrationQInvariance::test_calibration_invariant_under_q`.
+
+**Where the basis to Bloomberg's view comes from**: Bloomberg builds `F` from a SOFR / futures-implied rate, not Treasury CMT, so our extracted `q` is shifted *down* by `(r_BB − r_treasury)` (~10 bp at 1M, ~50 bp at 5Y).  This is a structural rate-basis effect — the curve still reproduces Bloomberg's `F` exactly under our `r`, which is what self-consistent option pricing needs.  No free, no-key SOFR-OIS curve source is currently available.
+
+---
+
+## 14. Test Suite
+
+Tests live in `tests/` and are run with `uv run pytest tests/ -v`.  The full
+suite contains **132 tests** across seven files.
+
+| File | Tests | Coverage |
+|---|---|---|
+| `test_data_loader.py` | 8 | Schema validation, long-format output columns, metadata extraction, time-to-expiry computation |
+| `test_surface_builder.py` | 4 | Surface grid shape, no negative vols, front-end spike preservation, 1-D interpolation |
+| `test_arbitrage_checks.py` | 7 | Calendar / butterfly / vertical check logic on synthetic data |
+| `test_heston.py` | 38 | Black-76 (scalar + vectorised, IV roundtrip), Heston CF properties (`f_j(0)=1`, modulus, stress), call pricing (positivity, spot cap, intrinsic floor, put-call parity, monotonicity in K, zero-vol-of-vol collapses to Black-76), smile batch, MC (Fourier reference within 3 SE, seed reproducibility, barrier ordering), and **9 one-touch tests** (bounded by payout, immediate payment past barrier, unreachable barrier, monotonicity in B, seed, payout linearity, validation) |
+| `test_montecarlo.py` | 10 | One-touch under Dupire LV: bounded by payout, immediate payment, unreachable barrier, monotonicity in B, seed reproducibility, payout linearity, rate sensitivity for down-touch, validation |
+| `test_dividends.py` | 29 | Parity-based implied-q extraction (recovery to machine precision under flat / non-flat rate curves, scalar-rate duck-typing, max-T filter, error on empty window), `q·T` linear interpolation (at-node, between-nodes, flat extrapolation, single-node and empty-curve edge cases), `DivCurve` API + table round-trip, `flat_div_curve` / `build_curve_from_table` builders, `get_div_yield` scalar/curve duck-typing, `F = S·exp((r−q)·T)` self-consistency from extracted q, sidebar-table round-trip regression, and a **Heston-calibration q-invariance** regression: prices/vegas are homogeneous of degree 1 in `(F, K)` under moneyness-quoted IVs, so calibrated params must be bit-identical for `q = 0` vs `q = 5%` (guards against future re-introduction of an inert F-rebuild) |
+| `test_rates.py` | 36 | BEY → continuous conversion, recursive coupon-bond bootstrap (2y/3y/5y self-consistency under flat, normal, inverted, mildly-negative, and *strongly-negative* −8 % curves), log-DF interpolation (at-node, between-nodes, flat extrapolation, geometric-mean DF property), `RateCurve` API, builder helpers, scalar/curve duck-typing, full-tenor completeness, tuple-roundtrip for the Streamlit cache key, and **canonical-label round-trip** through `as_table` (regression guard so user edits to 1M/2M/4M rows aren't silently dropped) |
+
+Tests that need market data load from `data_vol_surface/vol_surface_14_04_2026.xlsx`
+(the older of the two bundled snapshots — kept stable across commits so the
+test fixtures don't drift when newer files are added).  The Treasury
+network fetch itself is *not* covered by unit tests — those would belong in
+a separate integration suite.
+
+---
+
+## 15. Known Limitations & Data Notes
 
 **Front-end anomalies (very short expiries)**
 
@@ -885,36 +1410,71 @@ to the actual spread.
 
 **Black-76 pricing for vertical check**
 
-Call prices are computed from implied vols using Black-76 with the user-
-supplied risk-free rate.  Results are sensitive to the rate for deep ITM/OTM
-options or very long maturities.  The default of 4.5 % is appropriate for
-USD rates as of April 2026.
+Call prices are computed from implied vols using Black-76, with the
+**slice-specific zero rate `r(T)` read off the Treasury-bootstrapped curve**
+for each expiry.  The default rate set is fetched live from treasury.gov
+for the snapshot date and bootstrapped to continuous zeros; the user can
+override any tenor in the sidebar table.  Results are sensitive to the
+rate for deep ITM/OTM options or very long maturities — using a per-slice
+curve rather than a flat rate noticeably tightens the long end.
+
+**Implied dividend curve — SOFR-Treasury basis (residual gap to Bloomberg)**
+
+`q(T)` is extracted by parity from the Bloomberg forward and the bootstrapped
+Treasury rate curve (`q(T) = r(T) − ln(F(T)/S)/T`), then OLS-fitted to a
+straight line in T and evaluated at canonical tenors — see [§7.1](#71-sidebar-controls).
+Bloomberg builds `F` from a SOFR / futures-implied rate, not Treasury CMT,
+so our extracted `q` is shifted *down* by `(r_BB − r_treasury)` (~10 bp at
+1M, ~50 bp at 5Y).  The curve still reproduces Bloomberg's `F` exactly
+under our `r`, which is what self-consistent option pricing needs — the
+residual gap to Bloomberg's "indicative dividend yield" is a SOFR-Treasury
+basis effect, not a fit bug.  No free, no-key SOFR-OIS curve source exists
+to close this.
 
 **Local vol at very short expiries**
 
-The `_T_MIN_CUTOFF = 0.04` (≈ 2 weeks) filter removes the very shortest
-expiries from the local vol computation.  These slices have too few T-
-neighbours for PCHIP to estimate `∂w/∂T` reliably and are excluded to keep
-the surface stable.
+The `_T_MIN_CUTOFF = 14 / 365` (~14 calendar days, ~2 weeks) filter removes
+the very shortest expiries from the local vol computation.  These slices have too
+few T-neighbours for PCHIP to estimate `∂w/∂T` reliably and are excluded
+to keep the surface stable.  Path simulations with `T < _T_MIN_CUTOFF`
+(and the early steps of any longer path) clamp the time axis at the
+boundary, so sub-cutoff OTs / barriers price against the LV slice at the
+cutoff rather than a true `t = 0` vol.
 
-**SVI no-arbitrage**
+**Per-slice SVI: no cross-slice arbitrage enforcement**
 
-The SVI fit in the Vol Smiles tab uses simple parameter bounds and does **not**
-enforce the full Gatheral no-static-arbitrage conditions (Lee moment formula,
-Durrleman condition).  For a fully arbitrage-free parametric fit, consider
-SSVI or a constrained SVI calibration.
+Both the Vol Smiles overlay and the local-vol pipeline fit **per-slice SVI**
+(Gatheral form) — the same fit, used twice.  Per-slice SVI is the fit family
+Bloomberg OVME and most production desks use for LV — not for arbitrage
+guarantees but because it preserves per-expiry idiosyncrasies (front-end
+skew bumps, off-ATM curvature variation) that a global parametric surface
+like SSVI would smooth away.  Note that "matches Bloomberg" here refers to
+the *fit family*, not necessarily the resulting prices: Bloomberg's OVME
+uses PDE solvers for path-dependent payoffs whereas this codebase uses
+discretely-monitored MC, which under-detects hits on short-dated barriers
+and one-touches by `O(σ·√Δt)`.
 
----
+Trade-off: per-slice SVI does **not** enforce calendar-spread no-arbitrage
+between adjacent slices.  Where neighbouring fits cross in `w(·, T)`, the
+Dupire denominator `g` goes ≤ 0 and the affected (K, T) point is masked
+to NaN in the LV surface.  In practice this is rare on real Bloomberg
+quotes and the holes appear at the wing edges where pricing accuracy is
+already poor — the MC pricer linearly fills them in T before sampling
+to avoid query failures.
 
-## 14. Future Extensions
+**Heston calibration is a compromise fit**
 
-| ID | Description |
-|---|---|
-| F-01 | **Delta-space display** — re-express the moneyness axis in Black-Scholes delta (Δ) for comparison with broker conventions |
-| F-02 | **Multi-asset support** — detect the ticker from the title row and allow uploading multiple workbooks simultaneously |
-| F-03 | **Historical comparison** — upload two snapshots and display the surface difference (vol change Δσ per node) |
-| F-04 | **Greeks surface** — derive and display vega, vanna, and volga surfaces from the fitted IV grid |
-| F-05 | **Gatheral density** — compute and plot the risk-neutral density implied by the butterfly condition |
-| F-06 | **PNG / SVG export** — add a download button for each chart |
-| F-07 | **CI pipeline** — add GitHub Actions running `uv run pytest tests/` and `ruff check src/` on every push |
-| F-08 | **SSVI / constrained SVI** — replace the unconstrained SVI fit with a fully arbitrage-free parametric form |
+A single set of five Heston parameters is projected onto the entire filtered
+surface.  For equity indices this typically gives an RMSE of ~5–10 pp — good
+enough to price exotics consistently with the overall smile level and skew,
+but not tight enough to recover the precise shape at every expiry.  For
+better slice-level precision, consider a time-dependent extension (e.g.
+piecewise-constant θ and ξ).
+
+**Feller violation under calibration**
+
+The default parameter bounds allow `2κθ < ξ²` because forcing Feller almost
+always degrades the IV fit for equity surfaces (high observed skew requires
+large ξ).  The full-truncation Euler scheme handles the violated regime
+without bias, but implied densities under calibrated parameters can place
+more mass near `v=0` than a Feller-constrained fit would.

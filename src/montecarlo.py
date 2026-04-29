@@ -54,9 +54,12 @@ The standard fix is a Brownian-bridge correction (Beaglehole–Dybvig–Zhou):
 between two consecutive simulated points S_i, S_{i+1} that both stay on
 the same side of the barrier, the conditional probability that a Brownian
 bridge crossed it during [t_i, t_{i+1}] has a closed form.  This is not
-applied here — `steps_per_year=252` is the recommended setting for
-production-style pricing of barriers and OTs, and barriers within ~2σ·√Δt
-of spot should be treated with caution.
+applied here, so the engine is best suited to *trader-facing prototype*
+pricing rather than production: `steps_per_year=252` is the recommended
+setting (daily fixings match most listed barrier contracts), and barriers
+within ~2σ·√Δt of spot should be treated with caution.  A real desk would
+either add the Brownian-bridge correction or move to a PDE solver for
+path-dependent payoffs (Bloomberg OVME does the latter).
 
 Out-of-bounds handling
 ----------------------

@@ -30,11 +30,14 @@ Two arbitrage-free smile parametrisations are commonly used:
     Bloomberg quotes rarely produce this in practice, and when they do
     the Dupire denominator `g` flags it (we mask those points to NaN).
 
-We use **per-slice SVI** here, matching Bloomberg OVME's local-vol
-output and most production desks.  Per-slice fits retain the local
-structure visible in the input quotes — the front-end skew, off-ATM
-bumps, and the curvature variation between adjacent expiries that an
-SSVI fit would smooth away.
+We use **per-slice SVI** here, the same fit family Bloomberg OVME's
+local-vol output and most production desks are built on.  Per-slice
+fits retain the local structure visible in the input quotes — the
+front-end skew, off-ATM bumps, and the curvature variation between
+adjacent expiries that an SSVI fit would smooth away.  This refers
+strictly to the *fit family*; the MC pricer that consumes this surface
+is discretely-monitored and so will not reproduce Bloomberg OVME's
+PDE-based barrier / one-touch prices exactly.
 
 SVI form per slice:
     w(x) = a + b · (ρ·z + √(z² + σ²))    where z = x − m
@@ -76,7 +79,7 @@ _LV_CAP       = 1.50    # 150 % hard ceiling — above this is a numerical artef
 _G_FLOOR      = 0.02    # denominator guard
 _W_FLOOR      = 1e-8
 _DWT_FLOOR    = 1e-6    # floor for dw/dT to avoid holes from numerical noise
-_T_MIN_CUTOFF = 0.04    # ~2 weeks
+_T_MIN_CUTOFF = 14 / 365  # ~14 calendar days — short enough that 30d MC sims clamp few steps
 _N_X_FINE     = 200     # fine x grid for SVI evaluation before T-derivative
 
 

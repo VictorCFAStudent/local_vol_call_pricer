@@ -150,6 +150,24 @@ def svi_fit(
     Model: w(x) = a + b·(ρ·(x-m) + √((x-m)² + σ²))
     where x = ln(K/F) is log-moneyness and w = σ_IV² · T total variance.
 
+    Objective is **relative** squared error so each moneyness point
+    contributes equally regardless of its absolute total-variance level —
+    absolute MSE causes the deep-OTM put wing (large w) to dominate and
+    collapses the call wing toward zero.  Multi-start with a data-driven
+    initialisation (m anchored at the observed smile minimum) avoids the
+    flat-minimum traps the single-start L-BFGS-B run was prone to.
+
+    Per-slice SVI in the smile overlay vs the LV pipeline
+    -----------------------------------------------------
+    This SVI fitter is used in two places:
+      · Here, on demand, to overlay a smooth fitted curve on the smile
+        chart of any single expiry.
+      · In `local_vol.build_local_vol`, as the source of analytical
+        `(w, ∂w/∂x, ∂²w/∂x²)` per slice that feed the Dupire formula.
+    Both call the same SVI form (`a + b·(ρz + √(z²+σ²))`) and the same
+    multi-start L-BFGS-B objective with relative MSE, so the overlay
+    is consistent with the smile actually driving the LV surface.
+
     Returns
     -------
     dict with keys: a, b, rho, m, sigma, success, residual
@@ -165,16 +183,35 @@ def svi_fit(
         w_hat = svi_w(params, x)
         if np.any(w_hat <= 0):
             return 1e10
-        return float(np.sum((w_hat - w_obs) ** 2))
+        return float(np.sum(((w_hat - w_obs) / w_obs) ** 2))   # relative MSE
 
-    x0 = [float(np.mean(w_obs)), 0.1, -0.5, 0.0, 0.1]
-    bounds = [(-0.5, 1.0), (1e-4, 1.0), (-0.999, 0.999), (-1.0, 1.0), (1e-4, 1.0)]
-    result = minimize(objective, x0, bounds=bounds, method="L-BFGS-B",
-                      options={"maxiter": 500, "ftol": 1e-14})
-    a, b, rho, m, sigma = result.x
+    # Data-driven seed: anchor m at the observed smile minimum (which may be
+    # off-ATM in skewed markets), and a just below that minimum w value.
+    i_min  = int(np.argmin(w_obs))
+    m_init = float(x[i_min])
+    a_init = float(w_obs[i_min]) * 0.85
+
+    starts = [
+        [a_init, 0.10, -0.70, m_init, 0.10],
+        [a_init, 0.15, -0.50, m_init, 0.15],
+        [a_init, 0.20, -0.80, m_init, 0.20],
+        [a_init, 0.10, -0.30, m_init, 0.05],
+        [float(np.mean(w_obs)), 0.10, -0.50, 0.0, 0.10],
+    ]
+    bounds = [(-0.5, 2.0), (1e-4, 2.0), (-0.999, 0.999), (-1.0, 1.0), (1e-4, 1.0)]
+
+    best_res, best_fun = None, np.inf
+    for x0 in starts:
+        result = minimize(objective, x0, bounds=bounds, method="L-BFGS-B",
+                          options={"maxiter": 2000, "ftol": 1e-15})
+        if result.fun < best_fun:
+            best_fun = result.fun
+            best_res = result
+
+    a, b, rho, m, sigma = best_res.x
     return {
         "a": float(a), "b": float(b), "rho": float(rho),
         "m": float(m), "sigma": float(sigma),
-        "success": bool(result.success),
-        "residual": float(result.fun),
+        "success": bool(best_res.success),
+        "residual": float(best_res.fun),
     }

@@ -4,12 +4,22 @@ plots.py — All chart generation functions.
 Every function returns a Plotly Figure so Streamlit can render it
 interactively.  Vols are converted back to percentage points for display.
 
+A single Plotly template named ``"bank"`` is registered at import time
+and set as the global default — every figure produced here inherits the
+fintech-style chrome (Inter font, navy primary, slate gridlines, no
+heavy chart titles).  Domain-meaningful colour scales (RdYlGn for IV
+surfaces, custom diverging scales for arbitrage flags) are kept where
+they carry information and only the chrome is restyled.
+
 Charts produced:
   · plot_surface_3d       — 3-D colour-map surface of IV(K, T)
   · plot_smile_slices     — IV vs moneyness for selected expiries
   · plot_term_structure   — ATM IV vs time-to-expiry
   · plot_heatmap          — IV as annotated colour-coded grid
   · plot_arbitrage_flags  — Smile with violation markers overlaid
+  · plot_local_vol_3d     — 3-D Dupire local vol surface
+  · plot_lv_vs_iv_slice   — LV vs IV per expiry
+  · plot_atm_term_structure — ATM LV / IV term structure
 """
 
 from __future__ import annotations
@@ -18,11 +28,95 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
+import plotly.io as pio
 
 from iv_surface_builder import SurfaceGrid
 from local_vol import LocalVolGrid
 
-_PALETTE = px.colors.qualitative.Plotly
+# ---------------------------------------------------------------------------
+# Bank-flavoured Plotly template (registered globally on import).
+# Matches the streamlit_app.py CSS palette (navy primary, slate text/grid).
+# Categorical colourway covers up to ~10 series before recycling — enough
+# for the smile-slice tab's quick-select default of 6 expiries with room.
+# ---------------------------------------------------------------------------
+_NAVY        = "#0a2540"
+_SLATE_TEXT  = "#334155"
+_SLATE_GRID  = "#e2e8f0"
+_SLATE_AXIS  = "#cbd5e1"
+_BG          = "#ffffff"
+
+_BANK_COLORWAY = [
+    "#0a2540",   # navy
+    "#0f766e",   # teal
+    "#b45309",   # amber
+    "#1e40af",   # blue
+    "#7c3aed",   # violet
+    "#0891b2",   # cyan
+    "#b91c1c",   # red
+    "#475569",   # slate
+    "#be185d",   # rose
+    "#16a34a",   # green
+]
+
+pio.templates["bank"] = go.layout.Template(
+    layout=dict(
+        font=dict(
+            family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+            size=12,
+            color=_SLATE_TEXT,
+        ),
+        title=dict(
+            font=dict(family="Inter, sans-serif", size=14, color=_NAVY),
+            x=0.0, xanchor="left", y=0.97,
+        ),
+        plot_bgcolor=_BG,
+        paper_bgcolor=_BG,
+        colorway=_BANK_COLORWAY,
+        xaxis=dict(
+            gridcolor=_SLATE_GRID,
+            zeroline=False,
+            showline=True,
+            linecolor=_SLATE_AXIS,
+            ticks="outside",
+            tickcolor=_SLATE_AXIS,
+            ticklen=4,
+            title=dict(font=dict(color=_SLATE_TEXT, size=12)),
+        ),
+        yaxis=dict(
+            gridcolor=_SLATE_GRID,
+            zeroline=False,
+            showline=True,
+            linecolor=_SLATE_AXIS,
+            ticks="outside",
+            tickcolor=_SLATE_AXIS,
+            ticklen=4,
+            title=dict(font=dict(color=_SLATE_TEXT, size=12)),
+        ),
+        legend=dict(
+            font=dict(family="Inter, sans-serif", size=11, color=_SLATE_TEXT),
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor=_SLATE_GRID,
+            borderwidth=1,
+        ),
+        hoverlabel=dict(
+            font=dict(family="IBM Plex Mono, monospace", size=11),
+            bgcolor=_NAVY, bordercolor=_NAVY, font_color="#ffffff",
+        ),
+        margin=dict(l=60, r=20, t=40, b=50),
+        # 3-D scenes inherit the same chrome
+        scene=dict(
+            xaxis=dict(gridcolor=_SLATE_GRID, backgroundcolor=_BG, showbackground=True,
+                       linecolor=_SLATE_AXIS, zerolinecolor=_SLATE_GRID),
+            yaxis=dict(gridcolor=_SLATE_GRID, backgroundcolor=_BG, showbackground=True,
+                       linecolor=_SLATE_AXIS, zerolinecolor=_SLATE_GRID),
+            zaxis=dict(gridcolor=_SLATE_GRID, backgroundcolor=_BG, showbackground=True,
+                       linecolor=_SLATE_AXIS, zerolinecolor=_SLATE_GRID),
+        ),
+    )
+)
+pio.templates.default = "bank"
+
+_PALETTE = _BANK_COLORWAY
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +393,7 @@ def plot_heatmap(df: pd.DataFrame) -> go.Figure:
             text=text,
             texttemplate="%{text}",
             hoverongaps=False,
+            xgap=1, ygap=1,
             hovertemplate=(
                 "Moneyness: %{x}<br>Expiry: %{y}<br>IV: %{z:.2f}%<extra></extra>"
             ),
@@ -306,10 +401,15 @@ def plot_heatmap(df: pd.DataFrame) -> go.Figure:
     )
     fig.update_layout(
         title="Implied Volatility Heatmap",
-        xaxis_title="Moneyness (%)",
-        yaxis_title="Expiry",
-        height=max(500, 20 * len(pivot)),
-        margin=dict(l=120),
+        # `type="category"` forces uniform column widths regardless of the
+        # numeric spacing between moneyness levels — without it, Plotly's
+        # default linear x-axis sizes cells by the gap between values, so
+        # 80→90 (gap 10) renders far wider than 95→97.5 (gap 2.5).
+        xaxis=dict(type="category", title="Moneyness (%)"),
+        yaxis=dict(type="category", title="Expiry"),
+        # Generous top margin so the title doesn't sit on the first row.
+        margin=dict(l=130, r=20, t=70, b=60),
+        height=max(520, 22 * len(pivot)),
     )
     return fig
 
@@ -378,8 +478,8 @@ def plot_arbitrage_flags(
                 x=ks, y=ivs, mode="markers", name="Butterfly Viol.",
                 marker=dict(color="darkorange", size=13, symbol="diamond",
                             line=dict(width=1, color="black")),
-                hovertemplate="Butterfly violation<br>K: %{x:.1f}%<br>d²IV/dK²: %{customdata:.4f}<extra></extra>",
-                customdata=[v["d2iv"] for v in bfly_v],
+                hovertemplate="Butterfly violation<br>K: %{x:.1f}%<br>d²C/dK²: %{customdata:.4g}<extra></extra>",
+                customdata=[v["d2C"] for v in bfly_v],
             )
         )
 

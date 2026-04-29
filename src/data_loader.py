@@ -113,11 +113,54 @@ def _parse_vol_surface(raw: pd.DataFrame, snap: date) -> pd.DataFrame:
     return df
 
 
+def _extract_spot_from_strike_grid(raw: pd.DataFrame) -> float | None:
+    """Back-derive the spot price from row 1's absolute-strike grid.
+
+    Bloomberg writes the moneyness percentages in row 0 ("60.0%", "80.0%",
+    ..., "140.0%") and the corresponding absolute strikes in row 1
+    ("4263.8", "5685.1", ...).  Every cell satisfies `K = m_pct × S` for
+    the *same* `S`, so each column independently recovers the spot up to
+    per-cell rounding (≈ 5 cents).  Taking the median across columns is
+    robust to a stray rounding outlier or a missing column.
+
+    This is the right number to use as `S` in the parity formula `q(T) =
+    r(T) − ln(F(T)/S) / T` — Bloomberg's actual reference spot, not the
+    earliest forward (which is `S·exp((r−q)·T_earliest)` and so differs
+    by ≈ 1 bp of price).  Returns `None` if the row is unusable.
+    """
+    # Catch the *specific* failure modes of the row-1 strike grid: missing /
+    # short rows (IndexError, KeyError), non-numeric cells (ValueError,
+    # TypeError).  A bare `except Exception` would also swallow upstream
+    # bugs (typos, refactor mistakes) silently.
+    try:
+        header_row = raw.iloc[0]
+        m_pcts: list[float] = []
+        for cell in header_row.iloc[_VOL_START:]:
+            if pd.isna(cell):
+                break
+            m_pcts.append(float(str(cell).replace("%", "")))
+        if not m_pcts:
+            return None
+        strike_row = raw.iloc[1, _VOL_START:_VOL_START + len(m_pcts)].values
+        strikes = np.asarray(strike_row, dtype=float)
+        m_pcts_arr = np.asarray(m_pcts, dtype=float)
+        if np.any(m_pcts_arr <= 0) or np.any(np.isnan(strikes)):
+            return None
+        per_col_spot = strikes / (m_pcts_arr / 100.0)
+        return float(np.nanmedian(per_col_spot))
+    except (IndexError, KeyError, ValueError, TypeError):
+        return None
+
+
 def _extract_metadata(raw: pd.DataFrame, vol_df: pd.DataFrame, snap: date) -> dict:
     title = "Implied Volatility Surface"
 
-    spot: float | None = None
-    if not vol_df.empty:
+    # Prefer Bloomberg's reference spot encoded in the strike grid (row 1).
+    # Falls back to the earliest expiry's forward only if that row is
+    # missing or unparseable — the forward is `S·exp((r−q)·T_earliest)`,
+    # off by ~1 bp of price for SPX, which is wrong but bounded.
+    spot: float | None = _extract_spot_from_strike_grid(raw)
+    if spot is None and not vol_df.empty:
         earliest = vol_df.loc[vol_df["time_to_expiry"].idxmin()]
         spot = float(earliest["forward_price"])
 

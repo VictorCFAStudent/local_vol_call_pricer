@@ -1,5 +1,5 @@
 """
-local_vol.py — Dupire local volatility surface via SVI analytical derivatives.
+local_vol.py — Dupire local volatility surface via per-slice SVI analytical derivatives.
 
 Theory
 ------
@@ -12,26 +12,48 @@ x = ln(K/F):
           + ¼·(∂w/∂x)²·(−¼ − 1/w + x²/w²)
           + ½·(∂²w/∂x²)
 
-Numerical strategy — why SVI?
-------------------------------
-With only ~12 moneyness quotes per expiry (60 %–140 % in the Bloomberg OVME
-sheet), numerical second derivatives of the implied vol smile are highly
-sensitive to the non-uniform strike spacing — the cluster around ATM
-causes CubicSpline to produce wild d²w/dx² values.
+Why per-slice SVI (and not SSVI)
+--------------------------------
+Two arbitrage-free smile parametrisations are commonly used:
 
-Instead we:
-  1. Fit Gatheral SVI per expiry slice.
-     SVI gives a smooth, arbitrage-aware parametric smile.
-  2. Evaluate w(x), dw/dx, d²w/dx² analytically from the SVI formula.
-     For SVI:  w(x) = a + b·(ρ·z + √(z²+σ²))   where z = x−m
-               dw/dx   = b·(ρ + z/d),             d = √(z²+σ²)
-               d²w/dx² = b·σ²/d³                  (always ≥ 0 when b,σ > 0)
-  3. Evaluate dw/dT per x column using PCHIP — shape-preserving monotone
-     interpolation that guarantees dw/dT ≥ 0 where the data is monotone.
-  4. Apply the Dupire formula on the fine (x, T) grid, then display.
+  · **SSVI** (Gatheral–Jacquier 2014): one ATM total-variance curve `θ(T)`
+    plus three globals `(ρ, η, γ)` shared across all expiries.  Calendar /
+    butterfly arbitrage-free by construction, but only **3 + N_T** degrees
+    of freedom for the entire surface — so per-slice idiosyncrasies (a
+    bump at 110% moneyness on the 1M, a different curvature at 3M …) get
+    averaged into `φ(θ) = η·θ⁻ᵞ` and disappear.  Theoretically clean,
+    but visibly too smooth to reproduce a desk-grade local-vol surface.
 
-Because d²w/dx² = b·σ²/d³ ≥ 0 by construction when the SVI fit is good, the
-denominator g is much better-conditioned than with numerical derivatives.
+  · **Per-slice SVI** (Gatheral): five parameters `(a, b, ρ, m, σ)` per
+    expiry, each slice fit independently.  No cross-slice constraint, so
+    adjacent slices *can* cross in `w(·, T)` (calendar arb).  Real
+    Bloomberg quotes rarely produce this in practice, and when they do
+    the Dupire denominator `g` flags it (we mask those points to NaN).
+
+We use **per-slice SVI** here, matching Bloomberg OVME's local-vol
+output and most production desks.  Per-slice fits retain the local
+structure visible in the input quotes — the front-end skew, off-ATM
+bumps, and the curvature variation between adjacent expiries that an
+SSVI fit would smooth away.
+
+SVI form per slice:
+    w(x) = a + b · (ρ·z + √(z² + σ²))    where z = x − m
+
+x-derivatives, analytic:
+    ∂w/∂x   = b · (ρ + z/d)               where d = √(z² + σ²)
+    ∂²w/∂x² = b · σ² / d³                  always ≥ 0 when b, σ > 0
+
+T-derivatives via PCHIP on the fine (x, T) grid — shape-preserving and
+non-negative wherever `w(x, ·)` is monotone.  A synthetic anchor
+(T = 0, w = 0) is prepended to give PCHIP a well-conditioned left
+boundary, exact since total variance vanishes at zero expiry.
+
+Calendar-arbitrage detection (not enforcement)
+----------------------------------------------
+Where the per-slice fits cross or `g ≤ _G_FLOOR`, those points are
+flagged in `arb_mask` and rendered as holes in the LV grid.  The MC
+pricer fills holes by linear interpolation in T before sampling, so
+pricing remains stable; the holes are diagnostic, not pricing-blocking.
 """
 
 from __future__ import annotations
@@ -59,20 +81,36 @@ _N_X_FINE     = 200     # fine x grid for SVI evaluation before T-derivative
 
 
 # ---------------------------------------------------------------------------
-# SVI helpers
+# Per-slice SVI helpers (Gatheral form)
 # ---------------------------------------------------------------------------
 
 def _svi_fit_slice(x: np.ndarray, w_obs: np.ndarray) -> dict | None:
-    """Fit SVI to (x, w) pairs.  Returns param dict or None on failure.
+    """Fit a single Gatheral SVI slice to (x, w) pairs.
 
-    Uses relative squared-error as the objective so that each moneyness
-    point contributes equally regardless of its absolute total-variance
-    level.  Absolute MSE causes the extreme wing (60 % put with w >> ATM)
-    to dominate the fit, collapsing the right wing toward zero.
+    Returns
+    -------
+    dict {"a", "b", "rho", "m", "sigma"} on success, or None if the fit
+    is poor enough that the numerical-derivative fallback is preferable.
 
-    Multiple restarts with a data-driven initialisation: m is seeded at the
-    observed smile minimum (which may be off-ATM in skewed markets), and a
-    is seeded just below that minimum w value.
+    Objective
+    ---------
+    Sum of squared *relative* errors `((w_hat − w)/w)²` so each moneyness
+    point contributes comparably regardless of its absolute total-variance
+    level.  Plain MSE causes the deep-OTM wing (large w) to dominate the
+    fit and collapses the opposite wing toward zero.
+
+    Multi-start
+    -----------
+    Five SPX-flavoured starts feed L-BFGS-B; the best residual wins.  `m`
+    is seeded at the observed smile minimum (which may be off-ATM in
+    skewed markets), and `a` at 85 % of that minimum w value — both data-
+    driven seeds avoid the flat-minimum traps of a single-start solver.
+
+    Acceptance
+    ----------
+    Reject when mean relative squared error exceeds 0.04 (≈ 20 % avg
+    relative error per point).  A poor SVI is worse than the fallback
+    (linear w-interpolation + np.gradient), which the caller will use.
     """
     def svi_w(p, x):
         a, b, rho, m, sigma = p
@@ -83,9 +121,8 @@ def _svi_fit_slice(x: np.ndarray, w_obs: np.ndarray) -> dict | None:
         w_hat = svi_w(p, x)
         if np.any(w_hat <= 0):
             return 1e10
-        return float(np.sum(((w_hat - w_obs) / w_obs) ** 2))   # relative MSE
+        return float(np.sum(((w_hat - w_obs) / w_obs) ** 2))
 
-    # Data-driven seed: anchor m at the observed smile minimum
     i_min  = int(np.argmin(w_obs))
     m_init = float(x[i_min])
     a_init = float(w_obs[i_min]) * 0.85
@@ -107,8 +144,6 @@ def _svi_fit_slice(x: np.ndarray, w_obs: np.ndarray) -> dict | None:
             best_fun = res.fun
             best_res = res
 
-    # Reject if average relative error per point exceeds 20 %.
-    # A poor SVI is worse than the numerical fallback.
     if best_res is None or best_fun / len(w_obs) > 0.04:
         return None
 
@@ -116,17 +151,18 @@ def _svi_fit_slice(x: np.ndarray, w_obs: np.ndarray) -> dict | None:
     if not np.all(svi_w(best_res.x, x) > 0):
         return None
 
-    return {"a": a, "b": b, "rho": rho, "m": m, "sigma": sigma}
+    return {"a": float(a), "b": float(b), "rho": float(rho),
+            "m": float(m), "sigma": float(sigma)}
 
 
 def _svi_eval(p: dict, x: np.ndarray):
-    """Return (w, dw_dx, d2w_dx2) analytically from SVI params."""
+    """Return (w, dw/dx, d²w/dx²) analytically from SVI params at fixed T."""
     a, b, rho, m, sigma = p["a"], p["b"], p["rho"], p["m"], p["sigma"]
     z = x - m
-    d = np.sqrt(z**2 + sigma**2)
-    w      = a + b * (rho * z + d)
-    dw     = b * (rho + z / d)
-    d2w    = b * sigma**2 / d**3
+    d = np.sqrt(z * z + sigma * sigma)
+    w   = a + b * (rho * z + d)
+    dw  = b * (rho + z / d)
+    d2w = b * sigma * sigma / (d ** 3)
     return w, dw, d2w
 
 
@@ -167,7 +203,15 @@ def build_local_vol(
 
     N_T = w_raw.shape[0]
 
-    # ── Step 1: SVI fit per expiry → analytical x-derivatives on fine x grid ─
+    # ── Step 1: Per-slice SVI fit → analytical x-derivatives on fine x grid ─
+    # One independent (a, b, ρ, m, σ) per expiry.  Each slice retains its
+    # own shape — that's what produces the front-end skew bumps and the
+    # off-ATM curvature variation visible in Bloomberg OVME's local-vol
+    # surface.  When a slice's SVI fit is poor (too few quotes, noisy
+    # smile, optimiser stuck) we fall back to linear interpolation of
+    # raw `w` plus numerical `np.gradient` for the derivatives — better
+    # to pass through the noisy quotes locally than to force a bad
+    # parametric fit.
     x_fine  = np.linspace(x_raw.min(), x_raw.max(), _N_X_FINE)
     w_fine  = np.zeros((N_T, _N_X_FINE))
     dw_dx_fine   = np.zeros_like(w_fine)
@@ -177,13 +221,15 @@ def build_local_vol(
         p = _svi_fit_slice(x_raw, w_raw[i])
         if p is not None:
             w_f, dw_f, d2w_f = _svi_eval(p, x_fine)
-            # Sanity-clip: SVI w must be positive
+            # Sanity-clip: SVI w must be positive on the fine grid
             if np.all(w_f > 0):
-                w_fine[i]        = w_f
-                dw_dx_fine[i]    = dw_f
-                d2w_dx2_fine[i]  = d2w_f
+                w_fine[i]       = w_f
+                dw_dx_fine[i]   = dw_f
+                d2w_dx2_fine[i] = d2w_f
                 continue
-        # Fallback: interpolate raw w to fine grid, use numerical derivatives
+        # Fallback for poor / rejected SVI: numerical derivatives on the
+        # interpolated raw w — locally faithful but with no smoothness
+        # guarantee in T (PCHIP downstream still does shape preservation).
         w_interp = np.interp(x_fine, x_raw, w_raw[i])
         w_fine[i]       = np.maximum(w_interp, _W_FLOOR)
         dw_dx_fine[i]   = np.gradient(w_fine[i],   x_fine)

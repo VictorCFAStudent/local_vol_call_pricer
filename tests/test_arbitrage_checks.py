@@ -73,25 +73,24 @@ def test_calendar_violation_detected():
 # ---------------------------------------------------------------------------
 
 def test_butterfly_no_violation():
-    """Standard downward-sloping put skew — d²IV/dK² > 0 everywhere."""
+    """Well-behaved smile → call prices convex in K (d²C/dK² ≥ 0 everywhere)."""
     df = _make_df(
         expiries=[("1Y", 1.0)],
         moneyness=[80., 90., 95., 100., 105., 110., 120.],
         vols_matrix=[[0.40, 0.30, 0.25, 0.20, 0.22, 0.26, 0.35]],
     )
-    result = check_butterfly_spread(df)
+    result = check_butterfly_spread(df, r=0.045)
     assert result.passed
 
 
 def test_butterfly_violation_detected():
-    """A local concavity in the smile must be flagged."""
-    # ATM vol (100%) artificially high → concave around it
+    """An ATM vol spike breaks call-price convexity — must be flagged."""
     df = _make_df(
         expiries=[("1Y", 1.0)],
         moneyness=[80., 90., 100., 110., 120.],
         vols_matrix=[[0.20, 0.18, 0.25, 0.18, 0.20]],
     )
-    result = check_butterfly_spread(df)
+    result = check_butterfly_spread(df, r=0.045)
     assert not result.passed
     assert any(v["moneyness_pct"] == 100.0 for v in result.violations)
 

@@ -1,0 +1,11 @@
+# Streamlit theme — keeps the navy palette consistent with the
+# fintech-style CSS in src/streamlit_app.py.  `primaryColor` controls
+# the slider fill, value label, primary buttons and a few other
+# accent elements that can't easily be reached from CSS without
+# brittle deep-child selectors.
+[theme]
+primaryColor          = "#0a2540"
+backgroundColor       = "#f7f9fc"
+secondaryBackgroundColor = "#ffffff"
+textColor             = "#334155"
+font                  = "sans serif"

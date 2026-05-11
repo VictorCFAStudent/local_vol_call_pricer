@@ -652,10 +652,13 @@ shorter-dated total variance.
 proportional to `d²C/dK²`, which by the Breeden–Litzenberger identity equals
 `e^{-rT}·f(K, T)` where `f` is the risk-neutral density of the terminal
 spot.  A density must be non-negative, so call prices must be convex in
-strike at every expiry.  Convexity of the *implied vol* in `K` is **neither
-necessary nor sufficient** — typical equity put-skews are concave in `K`
-on the put wing yet entirely arbitrage-free, so an IV-space convexity test
-flags false positives and misses real arbitrages.
+strike at every expiry.  Convexity of the *implied vol* in `K` is a
+different condition: the BS map `IV → C` is nonlinear in both `IV` and `K`,
+so `∂²IV/∂K²` and `∂²C/∂K²` need not share a sign — IV-space convexity is
+neither necessary nor sufficient for no butterfly arbitrage.  In practice
+equity smiles are essentially always convex in `K` (SVI builds this in),
+so an IV-convexity test would be vacuous regardless; price-space is
+where the constraint actually bites.
 
 **Condition:**
 
